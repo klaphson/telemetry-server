@@ -1,0 +1,24 @@
+services:
+  dev:
+    hostname: telemetry-server
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - shell-history:/root/.history
+      - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
+    environment:
+      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
+    stdin_open: true
+    tty: true
+    init: true
+    command: sleep infinity
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+
+volumes:
+  shell-history:

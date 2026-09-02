@@ -1,0 +1,37 @@
+# Czytelny prompt w kontenerze: zielony użytkownik/host, niebieski katalog.
+case "$TERM" in
+    xterm*|*-256color|screen-256color) color_prompt=yes ;;
+esac
+
+if [ "$color_prompt" = yes ]; then
+    PS1='\[\e[1;31m\]\u\[\e[0m\]\[\e[1;32m\]@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+else
+    PS1='\u@\h:\w\$ '
+fi
+unset color_prompt
+
+# Udostępnia historię wszystkim powłokom uruchomionym w tym workspace.
+HISTFILE=/root/.history/bash_history
+HISTCONTROL=ignoredups:erasedups
+HISTSIZE=10000
+HISTFILESIZE=20000
+shopt -s histappend
+PROMPT_COMMAND='history -a; history -n'
+
+if command -v dircolors >/dev/null 2>&1; then
+    eval "$(dircolors -b)"
+fi
+
+alias ls='ls --color=auto'
+alias ll='ls -alF --color=auto'
+alias la='ls -A --color=auto'
+alias l='ls -CF --color=auto'
+alias grep='grep --color=auto'
+alias egrep='egrep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias psf='ps -ef --forest'
+
+# Autouzupełnianie poleceń i argumentów, w tym Gita.
+if [[ $- == *i* ]] && [[ -r /usr/share/bash-completion/bash_completion ]]; then
+    source /usr/share/bash-completion/bash_completion
+fi
