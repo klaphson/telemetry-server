@@ -1,139 +1,180 @@
 # telemetry-server
 
-Educational high-performance Linux telemetry server built incrementally in modern C++.
+An educational Linux telemetry server written in C++20. It accepts
+newline-delimited TCP records on port 9000 and forwards them through a pipe to a
+reader process that prints them.
 
-## Stage 1: processes
+## Architecture
 
-This stage demonstrates:
+Two static libraries, `Server` and `Reader`, are linked into one executable,
+`telemetry-server`.
 
-- Linux process identity: PID, PPID, UID and GID
-- `fork()`
-- parent/child execution
-- `waitpid()`
-- process exit status
-- observing processes through `ps` and `/proc`
-
-## C++ notes: `[[nodiscard]]`
-
-`[[nodiscard]]` (available since C++17) tells the compiler to warn when a caller
-ignores a return value. In `src/server_main.cpp`, `IpcQueue::empty()` and
-`IpcQueue::pending_bytes()` use this attribute because their results are the
-purpose of calling them.
-
-```cpp
-IpcQueue queue;
-queue.empty();                       // May warn: result is ignored.
-const bool is_empty = queue.empty(); // Store the result for later use.
-if (!is_empty) {
-    // Handle queued data.
-}
+```text
+TCP clients → Server (parent process) → pipe → Reader (child process) → stdout
 ```
 
-The attribute does not change runtime behavior or guarantee a compilation error.
-If ignoring a result is intentional, an explicit cast to `void`, such as
-`(void)queue.empty();`, suppresses the nodiscard diagnostic.
+`src/main.cpp` creates the pipe and calls `fork()`. The parent calls
+`Server::run(pipeWriteFd)`; the child calls `Reader::run(pipeReadFd)` directly.
+Both processes run the same executable, without launching a separate Reader
+executable through `exec()`.
 
-C++20 also allows an explanation in the attribute:
+- `main()` owns the pipe descriptors, closes unused ends, and waits for the child
+  with `waitpid()` when the server returns. It ignores `SIGPIPE` so a closed reader
+  is reported as a write error.
+- `Server` uses nonblocking sockets and `epoll` to accept connections, read
+  records, and write queued data to the pipe. `handleEvent()` dispatches one
+  event; `run()` owns the wait loop and cleanup.
+- `Server::m_clients` stores each client's input buffer. `ClientState` is a
+  private nested struct. Disconnection and shutdown close client sockets and
+  remove their entries; the destructor closes any remaining client sockets.
+- `IpcQueue`, defined in `Server/include/IpcQueue.hpp`, buffers outgoing records
+  and tracks partial writes. It is local to `Server::run()`.
+- `Reader` performs blocking pipe reads and assembles complete lines for output.
 
-```cpp
-[[nodiscard("Check whether saving succeeded")]] bool save();
+The libraries borrow their pipe descriptors; `main()` closes them. Client
+connections belong to `Server`.
+
+## Project layout
+
+```text
+CMakeLists.txt                 Project settings, executable, and tests
+src/main.cpp                  Pipe creation and process management
+Server/
+    CMakeLists.txt            Server static library
+    include/Server.hpp        Server interface and client state
+    include/IpcQueue.hpp      Outgoing pipe queue
+    src/Server.cpp            TCP and epoll handling
+Reader/
+    CMakeLists.txt            Reader static library
+    include/Reader.hpp        Reader interface
+    src/Reader.cpp            Pipe reads and line processing
+tests/process_smoke.sh        Process and TCP integration test
 ```
 
-## Native build
+## Build and run on Linux
 
-Requirements:
+Requirements: a C++20 compiler, CMake 3.24 or newer, Ninja, and Make.
+The server uses Linux APIs including `epoll`, `accept4()`, and `pipe2()`.
 
-- Linux
-- C++20 compiler
-- CMake >= 3.24
-- Ninja
+From the project root:
 
 ```bash
-make run
+make build
+./build/telemetry-server
 ```
 
-## Docker development environment
+`make run` builds and starts the server in one command. Stop the foreground
+application with Ctrl+C.
 
-### Open the workspace directly in the container
-
-In VS Code (or Codex), install the **Dev Containers** extension if needed, then
-choose **Dev Containers: Reopen in Container**.  The project will use the `dev`
-service from `compose.yaml`; every newly opened integrated terminal will then
-start inside the container at `/workspace`.
-
-From a regular host terminal, use `make docker-shell` to enter that same
-running container.
-
-Build the toolchain image:
+The equivalent CMake commands are:
 
 ```bash
-make docker-build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
 ```
 
-Open a shell in the development container:
+To enable AddressSanitizer and UndefinedBehaviorSanitizer, use a separate build:
+
+```bash
+cmake -S . -B build-sanitized -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+    -DTELEMETRY_ENABLE_SANITIZERS=ON
+cmake --build build-sanitized
+```
+
+## Send telemetry
+
+With the server running, send records from another Bash terminal in the same
+host or container:
+
+```bash
+printf 'temperature=23\nhumidity=50\n' > /dev/tcp/127.0.0.1/9000
+```
+
+The server terminal should show Reader output such as:
+
+```text
+[reader] telemetry: temperature=23
+[reader] telemetry: humidity=50
+```
+
+Records must end with a newline. The server strips a trailing carriage return
+from CRLF records and ignores empty lines. It disconnects clients whose input
+buffer exceeds 64 KiB. The outgoing pipe queue is limited to 4 MiB; records that
+would exceed that limit are dropped with a log message.
+
+## Tests
+
+Stop any server using port 9000 before running:
+
+```bash
+make test
+```
+
+Or, after building:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+The Bash smoke test sends fragmented input and multiple records, checks Reader
+output, then terminates the Reader to verify that the parent reports failure.
+It requires Linux `/proc`, Bash TCP redirection, and a free port 9000. CTest sets
+a 15-second timeout.
+
+## Docker development
+
+The included Dockerfile provides the Linux compiler and debugging tools. Start
+and enter the development container from the host:
 
 ```bash
 make docker-shell
 ```
 
-Inside the container:
+Inside the container, the repository is mounted at `/workspace`:
 
 ```bash
 make run
 ```
 
-Or build and run directly:
+Open another terminal in the same container to send telemetry or inspect the
+processes:
 
 ```bash
-make docker-run
+docker compose exec dev bash
 ```
+
+The Compose configuration does not publish port 9000 to the host, so run the
+telemetry example inside the container. Run `make test` there after stopping the
+server. `make docker-build` builds the image; `make docker-run` builds and runs
+the application in a temporary container.
+
+The `.devcontainer` configuration also supports opening the project in the
+provided development container.
 
 ## Observe the processes
 
-Run the program in terminal A:
-
-```bash
-./build/telemetry-server
-```
-
-During the child's 15-second sleep, use terminal B:
+While the application runs, use a second Linux terminal:
 
 ```bash
 ps -ef --forest | grep telemetry-server
-```
-
-Inspect a specific process:
-
-```bash
 cat /proc/<PID>/status
-```
-
-Inspect its open file descriptors:
-
-```bash
 ls -l /proc/<PID>/fd
 ```
 
-Inspect the process tree:
-
-```bash
-pstree -p
-```
-
-Trace the system calls involved in process creation:
+To trace process creation and waiting, start the application under `strace`:
 
 ```bash
 strace -f -e trace=process ./build/telemetry-server
 ```
 
-Useful calls to look for:
+## C++ note: `[[nodiscard]]`
 
-- `clone(...)` or `clone3(...)` — libc implementation used underneath `fork()` on Linux
-- `wait4(...)` / `waitid(...)` — underlying wait operation
-- `exit_group(...)` — process termination
+`IpcQueue::empty()` and `IpcQueue::pendingBytes()` use `[[nodiscard]]` to warn
+when a caller ignores their results:
 
-## Why Docker is here
+```cpp
+const bool isEmpty = queue.empty();
+```
 
-Docker gives us a reproducible Linux userspace and toolchain. It does **not** emulate a separate Linux kernel: containers use the host Linux kernel. This is especially useful in this course because `/proc`, processes, signals, namespaces, sockets and system calls remain real Linux kernel mechanisms.
-
-Later stages will add threads, scheduling, IPC, shared memory, sockets, epoll, signals, filesystem layout, permissions and a systemd service.
+The attribute does not change runtime behavior. An explicit cast to `void`,
+such as `(void)queue.empty()`, indicates an intentionally discarded result.

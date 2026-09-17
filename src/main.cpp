@@ -1,90 +1,63 @@
-#include <sys/types.h>
+#include "Reader.hpp"
+#include "Server.hpp"
+
+#include <fcntl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <chrono>
+#include <cerrno>
+#include <csignal>
+#include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <iostream>
-#include <string_view>
-#include <thread>
 
-namespace {
-
-void print_process_info(std::string_view role)
+int main()
 {
-    std::cout
-        << "role=" << role
-        << " pid=" << ::getpid()
-        << " ppid=" << ::getppid()
-        << " uid=" << ::getuid()
-        << " gid=" << ::getgid()
-        << '\n';
-}
+    // Report a closed reader through write() instead of terminating on SIGPIPE.
+    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        perror("signal");
+        return EXIT_FAILURE;
+    }
+    std::cout << std::unitbuf;
 
-int run_process_demo()
-{
-    std::cout << "=== telemetry-server / stage 1: processes ===\n";
-    print_process_info("parent-before-fork");
-    std::cout.flush();
-
-    const pid_t child_pid = ::fork();
-
-    if (child_pid < 0) {
-        std::cerr << "fork() failed: " << std::strerror(errno) << '\n';
+    int pipeFds[2]{};
+    if (pipe2(pipeFds, O_CLOEXEC) == -1) {
+        perror("pipe2");
         return EXIT_FAILURE;
     }
 
-    if (child_pid == 0) {
-        print_process_info("child");
-        std::cout << "child: sleeping for 15 seconds; inspect /proc/"
-                  << ::getpid() << " while it is alive\n";
-        std::cout.flush();
-
-        std::this_thread::sleep_for(std::chrono::seconds(15));
-
-        std::cout << "child: exiting with status 42\n";
-        return 42;
+    const pid_t readerPid = fork();
+    if (readerPid == -1) {
+        perror("fork");
+        close(pipeFds[0]);
+        close(pipeFds[1]);
+        return EXIT_FAILURE;
     }
 
-    std::cout << "parent: fork() returned child pid=" << child_pid << '\n';
-    std::cout << "parent: waiting for child with waitpid()\n";
-    std::cout.flush();
+    if (readerPid == 0) {
+        close(pipeFds[1]);
+        const int result = Reader{}.run(pipeFds[0]);
+        close(pipeFds[0]);
+        std::cout.flush();
+        std::cerr.flush();
+        _exit(result);
+    }
+
+    close(pipeFds[0]);
+    const int serverResult = Server{}.run(pipeFds[1]);
+    close(pipeFds[1]); // Let the reader drain the pipe and receive EOF.
 
     int status = 0;
-    const pid_t waited_pid = ::waitpid(child_pid, &status, 0);
+    while (waitpid(readerPid, &status, 0) == -1) {
+        if (errno != EINTR) {
+            perror("waitpid");
+            return EXIT_FAILURE;
+        }
+    }
 
-    if (waited_pid < 0) {
-        std::cerr << "waitpid() failed: " << std::strerror(errno) << '\n';
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS) {
+        std::cerr << "[main] reader failed\n";
         return EXIT_FAILURE;
     }
-
-    if (WIFEXITED(status)) {
-        std::cout << "parent: child " << waited_pid
-                  << " exited normally, exit_code=" << WEXITSTATUS(status)
-                  << '\n';
-    } else if (WIFSIGNALED(status)) {
-        std::cout << "parent: child " << waited_pid
-                  << " terminated by signal=" << WTERMSIG(status)
-                  << '\n';
-    }
-
-    print_process_info("parent-after-wait");
-    return EXIT_SUCCESS;
-}
-
-int self_test()
-{
-    return (::getpid() > 1 && ::getppid() > 0) ? EXIT_SUCCESS : EXIT_FAILURE;
-}
-
-} // namespace
-
-int main(int argc, char** argv)
-{
-    if (argc == 2 && std::string_view{argv[1]} == "--self-test") {
-        return self_test();
-    }
-
-    return run_process_demo();
+    return serverResult;
 }

@@ -7,44 +7,26 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TELEMETRY_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 
-add_executable(
-    telemetry-server
-    src/server_main.cpp
+add_library(telemetry_build_options INTERFACE)
+target_compile_options(telemetry_build_options INTERFACE
+    -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
-
-add_executable(
-    telemetry-writer
-    src/writer_main.cpp
-)
-
-target_include_directories(telemetry-server PRIVATE include)
-
-target_compile_options(telemetry-server PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wshadow
-)
-
-target_include_directories(telemetry-writer PRIVATE include)
-
-target_compile_options(telemetry-writer PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wshadow
-)
-
 if(TELEMETRY_ENABLE_SANITIZERS)
-    target_compile_options(telemetry-server PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_compile_options(telemetry-writer PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(telemetry-server PRIVATE -fsanitize=address,undefined)
-    target_link_options(telemetry-writer PRIVATE -fsanitize=address,undefined)
+    target_compile_options(telemetry_build_options INTERFACE
+        -fsanitize=address,undefined -fno-omit-frame-pointer
+    )
+    target_link_options(telemetry_build_options INTERFACE -fsanitize=address,undefined)
 endif()
+
+add_subdirectory(Server)
+add_subdirectory(Reader)
+
+add_executable(telemetry-server src/main.cpp)
+target_link_libraries(telemetry-server PRIVATE Server Reader telemetry_build_options)
 
 include(CTest)
 if(BUILD_TESTING)
-    add_test(NAME telemetry_process_smoke COMMAND telemetry-server telemetry-writer --self-test)
+    add_test(NAME telemetry_process_smoke
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_smoke.sh" $<TARGET_FILE:telemetry-server>)
+    set_tests_properties(telemetry_process_smoke PROPERTIES TIMEOUT 15)
 endif()
