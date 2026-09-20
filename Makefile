@@ -1,4 +1,10 @@
-.PHONY: configure build run test clean docker-build docker-shell docker-run
+.PHONY: configure build run test format hooks clean docker-build docker-shell docker-run
+
+format:
+	pre-commit run --all-files
+
+hooks:
+	pre-commit install
 
 configure:
 	cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug

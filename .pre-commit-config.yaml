@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format (18)
+        entry: clang-format-18 -i
+        language: system
+        types_or: [c, c++]
+        exclude: ^(build[^/]*/|cmake-build-[^/]*/)

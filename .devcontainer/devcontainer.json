@@ -3,5 +3,6 @@
   "dockerComposeFile": "../compose.yaml",
   "service": "dev",
   "workspaceFolder": "/workspace",
-  "shutdownAction": "stopCompose"
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "pre-commit install"
 }

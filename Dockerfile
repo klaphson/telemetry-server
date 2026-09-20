@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     bash-completion \
     cmake \
+    clang-format-18 \
+    pre-commit \
     ninja-build \
     gdb \
     strace \

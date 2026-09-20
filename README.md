@@ -151,6 +151,30 @@ the application in a temporary container.
 The `.devcontainer` configuration also supports opening the project in the
 provided development container.
 
+## Formatting and Git hooks
+
+C++ formatting uses clang-format 18 and the repository's `.clang-format`.
+The development image includes clang-format and pre-commit. Rebuild an existing
+Compose container from the host to install them:
+
+```bash
+docker compose up -d --build dev
+```
+
+For native Ubuntu development, install `clang-format-18` and `pre-commit` with
+`apt-get install`. Inside the development container (or your native Linux checkout):
+
+```bash
+make hooks    # Install the Git pre-commit hook once per checkout
+make format   # Format all tracked C/C++ files
+```
+
+Dev Containers install the hook automatically when created. Run Git commits in
+the environment where the tools and hook were installed.
+The hook formats staged C/C++ files before each commit. If it changes files,
+review and stage those changes, then commit again. `make format` also exits with
+a nonzero status when it changes files; run it again to confirm formatting passes.
+
 ## Observe the processes
 
 While the application runs, use a second Linux terminal:
