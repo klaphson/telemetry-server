@@ -5,11 +5,13 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -34,14 +36,14 @@ Server::~Server()
     }
 }
 
-int Server::run(int pipeWriteFd)
+int Server::run(int pipeWriteFd, int signalFd)
 {
     if (!setNonBlocking(pipeWriteFd)) {
         perror("fcntl pipe O_NONBLOCK");
         return EXIT_FAILURE;
     }
 
-    const int listen_fd = createSocket();
+    int listen_fd = createSocket();
 
     if (listen_fd == -1) {
         perror("createSocket");
@@ -94,6 +96,17 @@ int Server::run(int pipeWriteFd)
         return EXIT_FAILURE;
     }
 
+    if (!addEpollFd(
+            epoll_fd,
+            signalFd,
+            EPOLLIN | EPOLLERR | EPOLLHUP))
+    {
+        perror("epoll_ctl ADD signal");
+        close(epoll_fd);
+        close(listen_fd);
+        return EXIT_FAILURE;
+    }
+
     IpcQueue ipcQueue;
     std::vector<epoll_event> events(kMaxEvents);
 
@@ -101,9 +114,20 @@ int Server::run(int pipeWriteFd)
         << "[server] pid=" << getpid() << '\n'
         << "[server] listening on 0.0.0.0:" << kPort << '\n';
 
+    State state = State::Running;
+    int result = EXIT_FAILURE;
     bool running = true;
 
-    while (running) {
+    while (running)
+    {
+        if (state == State::Draining &&
+            ipcQueue.empty())
+        {
+
+            result = EXIT_SUCCESS;
+            break;
+        }
+
         const int ready = epoll_wait(
             epoll_fd,
             events.data(),
@@ -120,8 +144,20 @@ int Server::run(int pipeWriteFd)
         }
 
         for (int i = 0; i < ready; ++i) {
+            const auto &event = events[static_cast<std::size_t>(i)];
+
+            if (event.data.fd == signalFd) {
+                if (!handleSignalEvent(event, epoll_fd, listen_fd, state)) {
+                    result = EXIT_FAILURE;
+                    running = false;
+                    break;
+                }
+
+                continue;
+            }
+
             if (!handleEvent(
-                    events[static_cast<std::size_t>(i)],
+                    event,
                     epoll_fd,
                     listen_fd,
                     pipeWriteFd,
@@ -132,16 +168,14 @@ int Server::run(int pipeWriteFd)
         }
     }
 
-    while (!m_clients.empty())
-    {
-        const int fd = m_clients.begin()->first;
-        removeClient(epoll_fd, fd);
-    }
+    removeAllClients(epoll_fd);
 
-    close(listen_fd);
+    if (listen_fd != -1) {
+        close(listen_fd);
+    }
     close(epoll_fd);
 
-    return EXIT_FAILURE;
+    return result;
 }
 
 bool Server::setNonBlocking(int fd) const
@@ -417,6 +451,20 @@ void Server::removeClient(
     std::cout << "[server] client disconnected fd=" << client_fd << '\n';
 }
 
+void Server::removeAllClients(
+    int epollFd)
+{
+    while (!m_clients.empty())
+    {
+        const int clientFd =
+            m_clients.begin()->first;
+
+        removeClient(
+            epollFd,
+            clientFd);
+    }
+}
+
 bool Server::enqueueRecord(
     int epoll_fd,
     int pipe_fd,
@@ -487,4 +535,109 @@ bool Server::updatePipeInterest(
         : static_cast<std::uint32_t>(EPOLLERR | EPOLLHUP);
 
     return modifyEpollFd(epoll_fd, pipe_fd, events);
+}
+
+bool Server::handleSignalEvent(
+    const epoll_event &event,
+    int epollFd,
+    int &listenFd,
+    State &state)
+{
+    if ((event.events & EPOLLIN) != 0U) {
+        bool shutdownRequested = false;
+
+        if (!handleSignalFd(event.data.fd, shutdownRequested)) {
+            return false;
+        }
+
+        if (shutdownRequested && state == State::Running) {
+            std::cout << "[server] entering draining state\n";
+
+            state = State::Draining;
+            beginDraining(epollFd, listenFd);
+        }
+    }
+
+    if ((event.events & (EPOLLERR | EPOLLHUP)) != 0U) {
+        std::cerr << "[server] signalfd error\n";
+        return false;
+    }
+
+    return true;
+}
+
+bool Server::handleSignalFd(
+    int signalFd,
+    bool& shutdownRequested) const
+{
+    while (true) {
+        signalfd_siginfo info{};
+
+        const ssize_t bytesRead = read(
+            signalFd,
+            &info,
+            sizeof(info)
+        );
+
+        if (bytesRead ==
+            static_cast<ssize_t>(sizeof(info))) {
+
+            if (info.ssi_signo ==
+                    static_cast<std::uint32_t>(SIGINT) ||
+                info.ssi_signo ==
+                    static_cast<std::uint32_t>(SIGTERM)) {
+
+                std::cout
+                    << "[server] shutdown requested signal="
+                    << info.ssi_signo
+                    << '\n';
+
+                shutdownRequested = true;
+            }
+
+            continue;
+        }
+
+        if (bytesRead == -1 &&
+            errno == EINTR) {
+            continue;
+        }
+
+        if (bytesRead == -1 &&
+            (errno == EAGAIN ||
+             errno == EWOULDBLOCK)) {
+            return true;
+        }
+
+        if (bytesRead == 0) {
+            std::cerr
+                << "[server] unexpected signalfd EOF\n";
+            return false;
+        }
+
+        perror("read(signalfd)");
+        return false;
+    }
+}
+
+void Server::beginDraining(
+    int epollFd,
+    int& listenFd)
+{
+    if (listenFd != -1) {
+        epoll_ctl(
+            epollFd,
+            EPOLL_CTL_DEL,
+            listenFd,
+            nullptr
+        );
+
+        close(listenFd);
+        listenFd = -1;
+
+        std::cout
+            << "[server] stopped accepting clients\n";
+    }
+
+    removeAllClients(epollFd);
 }

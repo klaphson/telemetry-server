@@ -20,10 +20,17 @@ public:
     Server &operator=(Server &&) = delete;
 
     // Borrows the descriptor; the caller closes it after run() returns.
-    int run(int pipeWriteFd);
+    int run(int pipeWriteFd, int signalFd);
 
 private:
-    struct ClientState {
+    enum class State
+    {
+        Running,
+        Draining
+    };
+
+    struct ClientState
+    {
         std::string inputBuffer;
     };
 
@@ -58,6 +65,8 @@ private:
     void removeClient(
         int epoll_fd,
         int client_fd);
+    void removeAllClients(
+        int epollFd);
 
     // Pipe output
     bool enqueueRecord(
@@ -67,6 +76,18 @@ private:
         const std::string &record) const;
     bool flushIpcQueue(int pipe_fd, IpcQueue &queue) const;
     bool updatePipeInterest(int epoll_fd, int pipe_fd, bool want_epollout) const;
+
+    bool handleSignalEvent(
+        const epoll_event &event,
+        int epollFd,
+        int &listenFd,
+        State &state);
+    bool handleSignalFd(
+        int signalFd,
+        bool &shutdownRequested) const;
+    void beginDraining(
+        int epollFd,
+        int &listenFd);
 };
 
 #endif // SERVER_HPP

@@ -28,5 +28,11 @@ include(CTest)
 if(BUILD_TESTING)
     add_test(NAME telemetry_process_smoke
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_smoke.sh" $<TARGET_FILE:telemetry-server>)
-    set_tests_properties(telemetry_process_smoke PROPERTIES TIMEOUT 15)
+    add_test(NAME telemetry_graceful_shutdown
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/graceful_shutdown.sh" $<TARGET_FILE:telemetry-server>)
+
+    set_tests_properties(
+        telemetry_process_smoke
+        telemetry_graceful_shutdown
+        PROPERTIES TIMEOUT 15)
 endif()

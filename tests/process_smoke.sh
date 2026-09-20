@@ -10,7 +10,7 @@ cleanup() {
         wait "$server_pid" 2>/dev/null || true
     fi
     if [[ -n "$reader_pid" ]]; then
-        kill "$reader_pid" 2>/dev/null || true
+        kill -KILL "$reader_pid" 2>/dev/null || true
     fi
     rm -f "$log"
 }
@@ -49,7 +49,7 @@ grep -qF '[reader] telemetry: temperature=23' "$log"
 grep -qF '[reader] telemetry: humidity=50' "$log"
 
 # A failed reader must wake the server and produce a failed process exit.
-kill "$reader_pid"
+kill -KILL "$reader_pid"
 reader_pid=
 if wait "$server_pid"; then
     echo 'Expected failure after terminating the reader'

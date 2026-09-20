@@ -2,6 +2,7 @@
 #include "Server.hpp"
 
 #include <fcntl.h>
+#include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -11,6 +12,31 @@
 #include <cstdlib>
 #include <iostream>
 
+namespace {
+
+bool blockShutdownSignals(sigset_t& mask)
+{
+    if (sigemptyset(&mask) == -1) {
+        return false;
+    }
+
+    if (sigaddset(&mask, SIGINT) == -1) {
+        return false;
+    }
+
+    if (sigaddset(&mask, SIGTERM) == -1) {
+        return false;
+    }
+
+    return sigprocmask(
+        SIG_BLOCK,
+        &mask,
+        nullptr
+    ) != -1;
+}
+
+} // namespace
+
 int main()
 {
     // Report a closed reader through write() instead of terminating on SIGPIPE.
@@ -18,6 +44,14 @@ int main()
         perror("signal");
         return EXIT_FAILURE;
     }
+    
+    sigset_t shutdownMask{};
+
+    if (!blockShutdownSignals(shutdownMask)) {
+        perror("sigprocmask");
+        return EXIT_FAILURE;
+    }
+
     std::cout << std::unitbuf;
 
     int pipeFds[2]{};
@@ -44,7 +78,33 @@ int main()
     }
 
     close(pipeFds[0]);
-    const int serverResult = Server{}.run(pipeFds[1]);
+
+    const int signalFd = signalfd(
+        -1,
+        &shutdownMask,
+        SFD_NONBLOCK | SFD_CLOEXEC);
+
+    if (signalFd == -1)
+    {
+        perror("signalfd");
+
+        close(pipeFds[1]);
+
+        int status = 0;
+        while (waitpid(readerPid, &status, 0) == -1)
+        {
+            if (errno != EINTR)
+            {
+                perror("waitpid");
+                break;
+            }
+        }
+
+        return EXIT_FAILURE;
+    }
+
+    const int serverResult = Server{}.run(pipeFds[1], signalFd);
+    close(signalFd);
     close(pipeFds[1]); // Let the reader drain the pipe and receive EOF.
 
     int status = 0;
