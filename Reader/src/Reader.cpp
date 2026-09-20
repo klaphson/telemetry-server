@@ -1,7 +1,7 @@
-#include <unistd.h>
 #include <cerrno>
 #include <cstdlib>
 #include <iostream>
+#include <unistd.h>
 
 #include "Reader.hpp"
 
@@ -13,24 +13,20 @@ int Reader::run(int pipeReadFd) const
     std::array<char, bufferSize> buffer{};
     std::string pending;
 
-    while (true)
-    {
+    while (true) {
         const ssize_t bytesRead = read(pipeReadFd, buffer.data(), buffer.size());
 
-        if (bytesRead > 0)
-        {
+        if (bytesRead > 0) {
             readLine(pending, buffer, bytesRead);
             continue;
         }
 
-        if (bytesRead == 0)
-        {
+        if (bytesRead == 0) {
             std::cout << "[reader] EOF\n";
             break;
         }
 
-        if (errno == EINTR)
-        {
+        if (errno == EINTR) {
             continue;
         }
 
@@ -41,15 +37,14 @@ int Reader::run(int pipeReadFd) const
     return EXIT_SUCCESS;
 }
 
-void Reader::readLine(std::string &pending, const std::array<char, bufferSize> &buffer, ssize_t bytesRead) const
+void Reader::readLine(std::string &pending, const std::array<char, bufferSize> &buffer,
+                      ssize_t bytesRead) const
 {
     pending.append(buffer.data(), static_cast<std::size_t>(bytesRead));
 
-    while (true)
-    {
+    while (true) {
         const std::size_t newline = pending.find('\n');
-        if (newline == std::string::npos)
-        {
+        if (newline == std::string::npos) {
             break;
         }
 

@@ -39,7 +39,7 @@ struct IpcQueue {
         }
     }
 
-    bool appendLine(const std::string& line)
+    bool appendLine(const std::string &line)
     {
         compactIfNeeded();
 

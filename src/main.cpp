@@ -12,9 +12,10 @@
 #include <cstdlib>
 #include <iostream>
 
-namespace {
+namespace
+{
 
-bool blockShutdownSignals(sigset_t& mask)
+bool blockShutdownSignals(sigset_t &mask)
 {
     if (sigemptyset(&mask) == -1) {
         return false;
@@ -28,11 +29,7 @@ bool blockShutdownSignals(sigset_t& mask)
         return false;
     }
 
-    return sigprocmask(
-        SIG_BLOCK,
-        &mask,
-        nullptr
-    ) != -1;
+    return sigprocmask(SIG_BLOCK, &mask, nullptr) != -1;
 }
 
 } // namespace
@@ -44,7 +41,7 @@ int main()
         perror("signal");
         return EXIT_FAILURE;
     }
-    
+
     sigset_t shutdownMask{};
 
     if (!blockShutdownSignals(shutdownMask)) {
@@ -79,22 +76,16 @@ int main()
 
     close(pipeFds[0]);
 
-    const int signalFd = signalfd(
-        -1,
-        &shutdownMask,
-        SFD_NONBLOCK | SFD_CLOEXEC);
+    const int signalFd = signalfd(-1, &shutdownMask, SFD_NONBLOCK | SFD_CLOEXEC);
 
-    if (signalFd == -1)
-    {
+    if (signalFd == -1) {
         perror("signalfd");
 
         close(pipeFds[1]);
 
         int status = 0;
-        while (waitpid(readerPid, &status, 0) == -1)
-        {
-            if (errno != EINTR)
-            {
+        while (waitpid(readerPid, &status, 0) == -1) {
+            if (errno != EINTR) {
                 perror("waitpid");
                 break;
             }

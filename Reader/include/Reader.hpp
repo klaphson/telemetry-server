@@ -6,7 +6,7 @@
 
 class Reader
 {
-public:
+  public:
     Reader() = default;
     ~Reader() = default;
 
@@ -18,10 +18,11 @@ public:
     // Borrows the descriptor; the caller closes it after run() returns.
     int run(int pipeReadFd) const;
 
-private:
+  private:
     int m_pipeReadFd;
     constexpr static std::size_t bufferSize = 4096;
-    void readLine(std::string &pending, const std::array<char, bufferSize> &buffer, ssize_t bytesRead) const;
+    void readLine(std::string &pending, const std::array<char, bufferSize> &buffer,
+                  ssize_t bytesRead) const;
 };
 
 #endif // READER_HPP
