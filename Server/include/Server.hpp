@@ -40,13 +40,15 @@ class Server
     // Event handling
     bool addEpollFd(int epollFd, int fd, std::uint32_t events) const;
     bool modifyEpollFd(int epoll_fd, int fd, std::uint32_t events) const;
+
     // Returns false only when the event requires stopping the server.
     bool handleEvent(const epoll_event &event, int epollFd, int listenFd, int pipeWriteFd,
-                     IpcQueue &ipcQueue);
+                     IpcQueue &ipcQueue, bool &ingressPaused, State &state);
 
     // Client connections
     bool acceptClients(int epoll_fd, int listen_fd);
-    bool readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQueue);
+    bool readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQueue,
+                    bool &pauseIngressRequested);
     void removeClient(int epoll_fd, int client_fd);
     void removeAllClients(int epollFd);
 
@@ -58,6 +60,8 @@ class Server
     bool handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state);
     bool handleSignalFd(int signalFd, bool &shutdownRequested) const;
     void beginDraining(int epollFd, int &listenFd);
+
+    bool updateIngressInterest(int epollFd, int listenFd, bool enabled) const;
 };
 
 #endif // SERVER_HPP

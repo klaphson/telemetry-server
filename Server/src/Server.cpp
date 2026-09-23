@@ -107,6 +107,7 @@ int Server::run(int pipeWriteFd, int signalFd)
     State state = State::Running;
     int result = EXIT_FAILURE;
     bool running = true;
+    bool ingressPaused = false;
 
     while (running) {
         if (state == State::Draining && ipcQueue.empty()) {
@@ -139,7 +140,8 @@ int Server::run(int pipeWriteFd, int signalFd)
                 continue;
             }
 
-            if (!handleEvent(event, epoll_fd, listen_fd, pipeWriteFd, ipcQueue)) {
+            if (!handleEvent(event, epoll_fd, listen_fd, pipeWriteFd, ipcQueue, ingressPaused,
+                             state)) {
                 running = false;
                 break;
             }
@@ -206,13 +208,13 @@ bool Server::modifyEpollFd(int epoll_fd, int fd, std::uint32_t events) const
 }
 
 bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, int pipeWriteFd,
-                         IpcQueue &ipcQueue)
+                         IpcQueue &ipcQueue, bool &ingressPaused, State &state)
 {
     const int fd = event.data.fd;
     const std::uint32_t eventMask = event.events;
 
     if (fd == listenFd) {
-        if ((eventMask & EPOLLIN) != 0U) {
+        if (!ingressPaused && ((eventMask & EPOLLIN) != 0U)) {
             if (!acceptClients(epollFd, listenFd)) {
                 return false;
             }
@@ -236,6 +238,16 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, in
                 perror("epoll_ctl MOD pipe");
                 return false;
             }
+
+            if (state == State::Running && ingressPaused && ipcQueue.canResumeIngress()) {
+
+                if (!updateIngressInterest(epollFd, listenFd, true)) {
+                    perror("epoll_ctl MOD ingress resume");
+                    return false;
+                }
+
+                ingressPaused = false;
+            }
         }
 
         if ((eventMask & (EPOLLERR | EPOLLHUP)) != 0U) {
@@ -246,9 +258,25 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, in
         return true;
     }
 
-    if ((eventMask & EPOLLIN) != 0U) {
-        if (!readClient(epollFd, fd, pipeWriteFd, ipcQueue)) {
+    if (!ingressPaused && (eventMask & EPOLLIN) != 0U) {
+
+        bool pauseRequested = false;
+
+        if (!readClient(epollFd, fd, pipeWriteFd, ipcQueue, pauseRequested)) {
             return false;
+        }
+
+        if (pauseRequested) {
+            if (!updateIngressInterest(epollFd, listenFd, false)) {
+                perror("epoll_ctl MOD ingress pause");
+                return false;
+            }
+
+            ingressPaused = true;
+
+            std::cout << "[server] ingress paused, IPC pending=" << ipcQueue.pendingBytes() << '\n';
+
+            return true;
         }
     }
 
@@ -300,7 +328,8 @@ bool Server::acceptClients(int epoll_fd, int listen_fd)
     }
 }
 
-bool Server::readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQueue)
+bool Server::readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQueue,
+                        bool &pauseIngressRequested)
 {
     auto it = m_clients.find(client_fd);
     if (it == m_clients.end()) {
@@ -344,6 +373,14 @@ bool Server::readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQ
                 if (!enqueueRecord(epoll_fd, pipe_fd, ipcQueue, record)) {
                     return false;
                 }
+
+                if (ipcQueue.shouldPauseIngress()) {
+                    pauseIngressRequested = true;
+                }
+            }
+
+            if (pauseIngressRequested) {
+                return true;
             }
 
             continue;
@@ -390,9 +427,10 @@ bool Server::enqueueRecord(int epoll_fd, int pipe_fd, IpcQueue &queue,
                            const std::string &record) const
 {
     if (!queue.appendLine(record)) {
-        std::cerr << "[server] IPC queue limit reached (" << IpcQueue::maxBufferSize
-                  << " bytes), dropping record\n";
-        return true;
+        std::cerr << "[server] IPC queue hard limit reached "
+                  << "despite backpressure, pending=" << queue.pendingBytes() << '\n';
+
+        return false;
     }
 
     if (!flushIpcQueue(pipe_fd, queue)) {
@@ -525,4 +563,33 @@ void Server::beginDraining(int epollFd, int &listenFd)
     }
 
     removeAllClients(epollFd);
+}
+
+bool Server::updateIngressInterest(int epollFd, int listenFd, bool enabled) const
+{
+    std::uint32_t listenEvents = static_cast<std::uint32_t>(EPOLLERR | EPOLLHUP);
+
+    if (enabled) {
+        listenEvents |= static_cast<std::uint32_t>(EPOLLIN);
+    }
+
+    if (!modifyEpollFd(epollFd, listenFd, listenEvents)) {
+        return false;
+    }
+
+    for (const auto &[clientFd, client] : m_clients) {
+        static_cast<void>(client);
+
+        std::uint32_t clientEvents = static_cast<std::uint32_t>(EPOLLRDHUP | EPOLLERR | EPOLLHUP);
+
+        if (enabled) {
+            clientEvents |= static_cast<std::uint32_t>(EPOLLIN);
+        }
+
+        if (!modifyEpollFd(epollFd, clientFd, clientEvents)) {
+            return false;
+        }
+    }
+
+    return true;
 }

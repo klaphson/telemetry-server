@@ -7,6 +7,12 @@
 struct IpcQueue {
     static constexpr std::size_t maxBufferSize = 4 * 1024 * 1024;
     static constexpr std::size_t compactionThreshold = 64 * 1024;
+    static constexpr std::size_t pauseIngressThreshold = 3 * 1024 * 1024;
+    static constexpr std::size_t resumeIngressThreshold = 1 * 1024 * 1024;
+
+    static_assert(resumeIngressThreshold < pauseIngressThreshold);
+
+    static_assert(pauseIngressThreshold < maxBufferSize);
 
     std::string buffer;
     std::size_t offset = 0;
@@ -19,6 +25,16 @@ struct IpcQueue {
     [[nodiscard]] std::size_t pendingBytes() const noexcept
     {
         return empty() ? 0 : buffer.size() - offset;
+    }
+
+    [[nodiscard]] bool shouldPauseIngress() const noexcept
+    {
+        return pendingBytes() >= pauseIngressThreshold;
+    }
+
+    [[nodiscard]] bool canResumeIngress() const noexcept
+    {
+        return pendingBytes() <= resumeIngressThreshold;
     }
 
     void compactIfNeeded()

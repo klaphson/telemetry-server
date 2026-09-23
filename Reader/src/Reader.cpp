@@ -51,6 +51,8 @@ void Reader::readLine(std::string &pending, const std::array<char, bufferSize> &
         const std::string line = pending.substr(0, newline);
         pending.erase(0, newline + 1);
 
-        std::cout << "[reader] telemetry: " << line << '\n';
+        // unitbuf flushes each insertion; assemble the message first so parent
+        // process output cannot land between the prefix and a short payload.
+        std::cout << ("[reader] telemetry: " + line + '\n');
     }
 }
