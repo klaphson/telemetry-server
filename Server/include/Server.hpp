@@ -23,6 +23,8 @@ class Server
     int run(int pipeWriteFd, int signalFd);
 
   private:
+    friend struct ServerTestAccess;
+
     enum class State { Running, Draining };
 
     struct ClientState {

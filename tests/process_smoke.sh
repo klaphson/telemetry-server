@@ -5,6 +5,7 @@ log=$(mktemp)
 server_pid=
 reader_pid=
 cleanup() {
+    local status=$?
     if [[ -n "$server_pid" ]]; then
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
@@ -12,7 +13,11 @@ cleanup() {
     if [[ -n "$reader_pid" ]]; then
         kill -KILL "$reader_pid" 2>/dev/null || true
     fi
+    if ((status != 0)); then
+        cat "$log" >&2
+    fi
     rm -f "$log"
+    exit "$status"
 }
 trap cleanup EXIT
 

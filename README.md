@@ -44,6 +44,7 @@ Server/
     include/Server.hpp        Server interface and client state
     include/IpcQueue.hpp      Outgoing pipe queue
     src/Server.cpp            TCP and epoll handling
+    test/                     Catch2 queue and backpressure unit tests
 Reader/
     CMakeLists.txt            Reader static library
     include/Reader.hpp        Reader interface
@@ -115,6 +116,19 @@ Or, after building:
 ```bash
 ctest --test-dir build --output-on-failure
 ```
+
+Catch2 unit tests cover the IPC queue thresholds and server backpressure, including
+pause/resume, record preservation, shutdown, and error propagation. They use
+nonblocking pipes and socket pairs and do not bind port 9000. Run only these tests
+with:
+
+```bash
+ctest --test-dir build -R '^(IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+```
+
+CMake uses an installed Catch2 3 package when available; otherwise it downloads
+Catch2 v3.8.1 during configuration, which requires network access. Configure with
+`-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
 The Bash smoke test sends fragmented input and multiple records, checks Reader
 output, then terminates the Reader to verify that the parent reports failure.

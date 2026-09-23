@@ -6,12 +6,18 @@ log=$(mktemp)
 server_pid=
 
 cleanup() {
+    local status=$?
+
     if [[ -n "$server_pid" ]]; then
         kill -KILL "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
     fi
 
+    if ((status != 0)); then
+        cat "$log" >&2
+    fi
     rm -f "$log"
+    exit "$status"
 }
 
 trap cleanup EXIT
