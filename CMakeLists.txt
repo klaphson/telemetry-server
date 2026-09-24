@@ -34,6 +34,7 @@ if(BUILD_TESTING)
     include(Catch)
 endif()
 
+add_subdirectory(Protocol)
 add_subdirectory(Server)
 add_subdirectory(Reader)
 

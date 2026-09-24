@@ -9,6 +9,10 @@ reader process that prints them.
 Two static libraries, `Server` and `Reader`, are linked into one executable,
 `telemetry-server`.
 
+The `Protocol` directory defines a separate static library with a binary telemetry
+codec and its unit tests. The server and reader still exchange newline-delimited
+text; the binary codec is not yet integrated into the TCP or pipe data path.
+
 ```text
 TCP clients → Server (parent process) → pipe → Reader (child process) → stdout
 ```
@@ -49,6 +53,12 @@ Reader/
     CMakeLists.txt            Reader static library
     include/Reader.hpp        Reader interface
     src/Reader.cpp            Pipe reads and line processing
+Protocol/
+    CMakeLists.txt            Protocol static library
+    include/TelemetryRecord.hpp  Telemetry data fields and equality comparison
+    include/TelemetryCode.hpp    Binary codec API and frame constants
+    src/TelemetryCode.cpp     Binary encoding, decoding, and error descriptions
+    test/TelemetryCodecTest.cpp  Catch2 codec unit tests
 tests/process_smoke.sh        Process and TCP integration test
 ```
 
@@ -103,6 +113,62 @@ from CRLF records and ignores empty lines. It disconnects clients whose input
 buffer exceeds 64 KiB. The outgoing pipe queue is limited to 4 MiB; records that
 would exceed that limit are dropped with a log message.
 
+## Binary telemetry codec
+
+The API in `Protocol/include/TelemetryCode.hpp` lives in the
+`telemetry::protocol` namespace. `TelemetryRecord` contains `sensorId` and
+`metricId` (`std::uint32_t`), `timestampNs` (`std::uint64_t`, in nanoseconds),
+and `value` (`double`).
+
+Version 1 uses a fixed 32-byte frame. All multibyte fields are stored in
+big-endian order:
+
+| Byte offset | Size (bytes) | Field | Encoding / expected value |
+| --- | --- | --- | --- |
+| 0 | 4 | Magic | `0x544C5259` (ASCII `TLRY`) |
+| 4 | 2 | Version | Unsigned integer, `1` |
+| 6 | 2 | Declared frame size | Unsigned integer, `32` |
+| 8 | 4 | Sensor ID | Unsigned integer |
+| 12 | 4 | Metric ID | Unsigned integer |
+| 16 | 8 | Timestamp | Unsigned integer, nanoseconds |
+| 24 | 8 | Value | IEEE 754 binary64 bits |
+
+`encode(record)` returns a `Frame` (`std::array<std::byte, 32>`).
+The codec requires a 64-bit IEEE 754 `double` and preserves its bit pattern,
+including signed zero, infinities, and NaN payloads.
+
+`decode(frame)` accepts a `std::span<const std::byte>` containing exactly one
+complete frame, including when its starting address is unaligned. The caller
+must assemble fragmented input and separate concatenated frames before decoding.
+Validation checks the actual size, magic, version, and declared size in that order,
+returning `InvalidSize`, `InvalidMagic`, `UnsupportedVersion`, or
+`InvalidDeclaredFrameSize` on failure.
+
+The returned `DecodeResult` contains `record` and `error`; its explicit boolean
+conversion is true when `error == DecodeError::None`. `toString(error)` provides
+a readable error description. For example:
+
+```cpp
+#include "TelemetryCode.hpp"
+
+#include <iostream>
+
+void codecExample()
+{
+    using namespace telemetry::protocol;
+    const TelemetryRecord input{42, 7, 1'000'000'000ULL, 23.5};
+    const Frame frame = encode(input);
+    const DecodeResult result = decode(frame);
+    if (result) {
+        std::cout << result.record.value << '\n';
+    } else {
+        std::cerr << toString(result.error) << '\n';
+    }
+}
+```
+
+Link the `Protocol` CMake target to use the codec and its public include directory.
+
 ## Tests
 
 Stop any server using port 9000 before running:
@@ -117,13 +183,34 @@ Or, after building:
 ctest --test-dir build --output-on-failure
 ```
 
-Catch2 unit tests cover the IPC queue thresholds and server backpressure, including
-pause/resume, record preservation, shutdown, and error propagation. They use
-nonblocking pipes and socket pairs and do not bind port 9000. Run only these tests
-with:
+Catch2 unit tests cover:
+
+- The binary codec: known wire bytes, integer boundaries, exact floating-point
+  bits, truncated and oversized input, invalid headers, unaligned input, and
+  error descriptions.
+- IPC queue thresholds and server backpressure: pause/resume, record preservation,
+  shutdown, and error propagation, using nonblocking pipes and socket pairs.
+
+These unit tests do not bind port 9000. Run all Catch2 tests with:
 
 ```bash
-ctest --test-dir build -R '^(IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+ctest --test-dir build -R '^(TelemetryCodecTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+```
+
+The root `CMakeLists.txt` currently does not include `Protocol`. To enable the
+library and its nine codec test cases, add this line after the Catch2 setup and
+before the existing `add_subdirectory(Server)` call:
+
+```cmake
+add_subdirectory(Protocol)
+```
+
+Then configure, build, and run the codec tests:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+cmake --build build --target telemetry_protocol_test
+ctest --test-dir build -R '^TelemetryCodecTest\.' --output-on-failure
 ```
 
 CMake uses an installed Catch2 3 package when available; otherwise it downloads
