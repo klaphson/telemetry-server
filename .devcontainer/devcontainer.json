@@ -3,6 +3,14 @@
   "dockerComposeFile": "../compose.yaml",
   "service": "dev",
   "workspaceFolder": "/workspace",
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-vscode.cmake-tools"],
+      "settings": {
+        "cmake.cmakePath": "/usr/bin/cmake"
+      }
+    }
+  },
   "shutdownAction": "stopCompose",
   "postCreateCommand": "pre-commit install"
 }
