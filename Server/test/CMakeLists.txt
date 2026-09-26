@@ -5,6 +5,6 @@ catch_discover_tests(IpcQueueTest TEST_PREFIX "IpcQueueTest." PROPERTIES TIMEOUT
 
 add_executable(ServerBackpressureTest ServerBackpressureTest.cpp)
 target_link_libraries(ServerBackpressureTest PRIVATE
-    Server Catch2::Catch2WithMain telemetry_build_options)
+    Server Protocol Catch2::Catch2WithMain telemetry_build_options)
 catch_discover_tests(ServerBackpressureTest
     TEST_PREFIX "ServerBackpressureTest." PROPERTIES TIMEOUT 10)

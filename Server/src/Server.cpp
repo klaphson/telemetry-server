@@ -1,5 +1,6 @@
 #include "Server.hpp"
 #include "IpcQueue.hpp"
+#include "TelemetryCodec.hpp"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -10,6 +11,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -328,56 +330,73 @@ bool Server::acceptClients(int epoll_fd, int listen_fd)
     }
 }
 
-bool Server::readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQueue,
+bool Server::readClient(int epollFd, int clientFd, int pipeFd, IpcQueue &ipcQueue,
                         bool &pauseIngressRequested)
 {
-    auto it = m_clients.find(client_fd);
+    using namespace telemetry::protocol;
+
+    auto it = m_clients.find(clientFd);
+
     if (it == m_clients.end()) {
         return true;
     }
 
     ClientState &client = it->second;
-    char buffer[kReadBufferSize];
+
+    std::array<std::byte, kReadBufferSize> buffer{};
 
     while (true) {
-        const ssize_t n = recv(client_fd, buffer, sizeof(buffer), 0);
+        const ssize_t bytesRead = recv(clientFd, buffer.data(), buffer.size(), 0);
 
-        if (n > 0) {
-            client.inputBuffer.append(buffer, static_cast<std::size_t>(n));
+        if (bytesRead > 0) {
+            const auto count = static_cast<std::size_t>(bytesRead);
 
-            if (client.inputBuffer.size() > kMaxClientBuffer) {
-                std::cerr << "[server] client fd=" << client_fd << " exceeded input buffer limit\n";
-                removeClient(epoll_fd, client_fd);
+            client.inputBuffer.data.insert(client.inputBuffer.data.end(), buffer.begin(),
+                                           buffer.begin() + static_cast<std::ptrdiff_t>(count));
+
+            if (client.inputBuffer.pendingBytes() > kMaxClientBuffer) {
+
+                std::cerr << "[server] client fd=" << clientFd << " exceeded input buffer limit\n";
+
+                removeClient(epollFd, clientFd);
+
                 return true;
             }
 
-            while (true) {
-                const std::size_t newline = client.inputBuffer.find('\n');
-                if (newline == std::string::npos) {
-                    break;
+            while (client.inputBuffer.pendingBytes() >= kFrameSize) {
+
+                const std::span<const std::byte> frame{
+                    client.inputBuffer.data.data() + client.inputBuffer.offset, kFrameSize};
+
+                const DecodeResult decoded = decode(frame);
+
+                if (!decoded) {
+                    std::cerr << "[server] client fd=" << clientFd
+                              << " protocol error: " << toString(decoded.error) << '\n';
+
+                    removeClient(epollFd, clientFd);
+
+                    return true;
                 }
 
-                std::string record = client.inputBuffer.substr(0, newline);
-                client.inputBuffer.erase(0, newline + 1);
+                const TelemetryRecord &record = decoded.record;
 
-                if (!record.empty() && record.back() == '\r') {
-                    record.pop_back();
-                }
+                std::cout << "[server] fd=" << clientFd << " sensor=" << record.sensorId
+                          << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
+                          << " value=" << record.value << '\n';
 
-                if (record.empty()) {
-                    continue;
-                }
-
-                std::cout << "[server] fd=" << client_fd << " record=" << record << '\n';
-
-                if (!enqueueRecord(epoll_fd, pipe_fd, ipcQueue, record)) {
+                if (!enqueueFrame(epollFd, pipeFd, ipcQueue, frame)) {
                     return false;
                 }
+
+                client.inputBuffer.offset += kFrameSize;
 
                 if (ipcQueue.shouldPauseIngress()) {
                     pauseIngressRequested = true;
                 }
             }
+
+            client.inputBuffer.compact();
 
             if (pauseIngressRequested) {
                 return true;
@@ -386,8 +405,15 @@ bool Server::readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQ
             continue;
         }
 
-        if (n == 0) {
-            removeClient(epoll_fd, client_fd);
+        if (bytesRead == 0) {
+            if (client.inputBuffer.pendingBytes() != 0) {
+                std::cerr << "[server] client fd=" << clientFd
+                          << " disconnected with partial frame: "
+                          << client.inputBuffer.pendingBytes() << " bytes\n";
+            }
+
+            removeClient(epollFd, clientFd);
+
             return true;
         }
 
@@ -400,7 +426,9 @@ bool Server::readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQ
         }
 
         perror("recv");
-        removeClient(epoll_fd, client_fd);
+
+        removeClient(epollFd, clientFd);
+
         return true;
     }
 }
@@ -423,10 +451,10 @@ void Server::removeAllClients(int epollFd)
     }
 }
 
-bool Server::enqueueRecord(int epoll_fd, int pipe_fd, IpcQueue &queue,
-                           const std::string &record) const
+bool Server::enqueueFrame(int epoll_fd, int pipe_fd, IpcQueue &queue,
+                          std::span<const std::byte> frame) const
 {
-    if (!queue.appendLine(record)) {
+    if (!queue.appendFrame(frame)) {
         std::cerr << "[server] IPC queue hard limit reached "
                   << "despite backpressure, pending=" << queue.pendingBytes() << '\n';
 
@@ -448,8 +476,8 @@ bool Server::enqueueRecord(int epoll_fd, int pipe_fd, IpcQueue &queue,
 bool Server::flushIpcQueue(int pipe_fd, IpcQueue &queue) const
 {
     while (!queue.empty()) {
-        const char* data = queue.buffer.data() + queue.offset;
-        const std::size_t remaining = queue.buffer.size() - queue.offset;
+        const std::byte* data = queue.data.data() + queue.offset;
+        const std::size_t remaining = queue.pendingBytes();
 
         const ssize_t n = write(pipe_fd, data, remaining);
 

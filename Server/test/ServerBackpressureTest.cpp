@@ -1,5 +1,6 @@
 #include "IpcQueue.hpp"
 #include "Server.hpp"
+#include "TelemetryCodec.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -11,9 +12,19 @@
 #include <array>
 #include <cerrno>
 #include <string>
+#include <string_view>
 
 namespace
 {
+
+// Strings retain embedded zero bytes and make concatenation/fragmentation convenient.
+std::string frameBytes(std::uint64_t timestamp = 3)
+{
+    const auto frame = telemetry::protocol::encode({1, 2, timestamp, 1.0});
+    return {reinterpret_cast<const char*>(frame.data()), frame.size()};
+}
+
+constexpr auto frameSize = telemetry::protocol::kFrameSize;
 
 struct Descriptor {
     int fd;
@@ -90,9 +101,9 @@ struct ServerTestAccess {
         return server.updateIngressInterest(epoll.fd, listener.fds[0], enabled);
     }
 
-    bool enqueue(const std::string &record)
+    bool enqueue(std::span<const std::byte> frame)
     {
-        return server.enqueueRecord(epoll.fd, pipe.fds[1], queue, record);
+        return server.enqueueFrame(epoll.fd, pipe.fds[1], queue, frame);
     }
 
     void drainState()
@@ -105,7 +116,12 @@ struct ServerTestAccess {
     }
     std::string pendingInput() const
     {
-        return server.m_clients.at(clientFd).inputBuffer;
+        const auto &input = server.m_clients.at(clientFd).inputBuffer;
+        if (input.empty()) {
+            return {};
+        }
+        return {reinterpret_cast<const char*>(input.data.data() + input.offset),
+                input.pendingBytes()};
     }
 
     void send(int fd, const std::string &data)
@@ -160,7 +176,7 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress interest toggles readability and ret
                  "[backpressure]")
 {
     send(listener.fds[1], "pending connection");
-    send(client.fds[1], "record\n");
+    send(client.fds[1], frameBytes());
     REQUIRE((readyEvents(listener.fds[0]) & EPOLLIN) != 0U);
     REQUIRE((readyEvents(clientFd) & EPOLLIN) != 0U);
 
@@ -181,22 +197,27 @@ TEST_CASE_METHOD(ServerTestAccess, "a full pipe pauses ingress at the high water
                  "[backpressure]")
 {
     fillPipe();
-    queue.buffer.assign(IpcQueue::pauseIngressThreshold - 2, 'x');
-    // Both complete records in this receive must survive the pause; preserve the
-    // partial record so that it can be completed after ingress resumes.
-    send(client.fds[1], "a\nb\r\npartial");
+    queue.data.assign(IpcQueue::pauseIngressThreshold - frameSize, std::byte{'x'});
+    const auto first = frameBytes(3);
+    const auto second = frameBytes(4);
+    const auto third = frameBytes(5);
+    const auto partial = third.substr(0, 10);
+    // Process both complete frames before pausing and retain the partial third frame.
+    send(client.fds[1], first + second + partial);
     REQUIRE(event(clientFd, EPOLLIN));
     REQUIRE(paused);
-    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold + 2);
-    REQUIRE(queue.buffer.ends_with("a\nb\n"));
-    REQUIRE(pendingInput() == "partial");
+    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold + frameSize);
+    const std::string_view queued(reinterpret_cast<const char*>(queue.data.data()),
+                                  queue.data.size());
+    REQUIRE(queued.ends_with(first + second));
+    REQUIRE(pendingInput() == partial);
     REQUIRE(hasClient());
 
-    send(client.fds[1], " remainder\n");
+    send(client.fds[1], third.substr(partial.size()));
     REQUIRE((readyEvents(clientFd) & EPOLLIN) == 0U);
     REQUIRE(event(clientFd, EPOLLIN)); // Readiness already returned before pausing.
-    REQUIRE(pendingInput() == "partial");
-    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold + 2);
+    REQUIRE(pendingInput() == partial);
+    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold + frameSize);
 
     readPipe();
     std::string forwarded;
@@ -205,10 +226,11 @@ TEST_CASE_METHOD(ServerTestAccess, "a full pipe pauses ingress at the high water
         forwarded += readPipe();
     }
     REQUIRE_FALSE(paused);
-    REQUIRE(forwarded == std::string(IpcQueue::pauseIngressThreshold - 2, 'x') + "a\nb\n");
+    REQUIRE(forwarded ==
+            std::string(IpcQueue::pauseIngressThreshold - frameSize, 'x') + first + second);
     REQUIRE((readyEvents(clientFd) & EPOLLIN) != 0U);
     REQUIRE(event(clientFd, EPOLLIN));
-    REQUIRE(readPipe() == "partial remainder\n");
+    REQUIRE(readPipe() == third);
     REQUIRE(pendingInput().empty());
 }
 
@@ -216,15 +238,25 @@ TEST_CASE_METHOD(ServerTestAccess, "client reading stops before the next receive
                  "[backpressure]")
 {
     fillPipe();
-    queue.buffer.assign(IpcQueue::pauseIngressThreshold - 2, 'x');
-    // More than one 4096-byte receive, with only one complete record in the first.
-    send(client.fds[1], "a\n" + std::string(8192, 'b') + "\n");
+    queue.data.assign(IpcQueue::pauseIngressThreshold - frameSize, std::byte{'x'});
+    // The first frame reaches the watermark. Finish the current 4096-byte receive,
+    // but leave the second receive's worth of frames in the socket.
+    std::string frames;
+    for (std::uint64_t timestamp = 0; frames.size() < 8192; ++timestamp) {
+        frames += frameBytes(timestamp);
+    }
+    send(client.fds[1], frames);
     REQUIRE(event(clientFd, EPOLLIN));
     REQUIRE(paused);
-    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold);
-    char next = 0;
-    REQUIRE(recv(clientFd, &next, 1, MSG_PEEK) == 1);
-    REQUIRE(next == 'b');
+    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold - frameSize + 4096);
+    REQUIRE(hasClient());
+    REQUIRE(pendingInput().empty());
+    const std::string_view queued(reinterpret_cast<const char*>(queue.data.data()),
+                                  queue.data.size());
+    REQUIRE(queued.ends_with(frames.substr(0, 4096)));
+    std::array<char, 8192> remaining{};
+    REQUIRE(recv(clientFd, remaining.data(), remaining.size(), MSG_PEEK) == 4096);
+    REQUIRE(std::string_view(remaining.data(), 4096) == frames.substr(4096));
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "pipe events resume ingress only at the low watermark",
@@ -233,8 +265,8 @@ TEST_CASE_METHOD(ServerTestAccess, "pipe events resume ingress only at the low w
     fillPipe(); // Keep pending bytes deterministic even for a stale EPOLLOUT event.
     REQUIRE(interest(false));
     paused = true;
-    queue.buffer.assign(IpcQueue::resumeIngressThreshold + 1, 'x');
-    send(client.fds[1], "waiting\n");
+    queue.data.assign(IpcQueue::resumeIngressThreshold + 1, std::byte{'x'});
+    send(client.fds[1], frameBytes());
 
     REQUIRE(event(pipe.fds[1], EPOLLOUT));
     REQUIRE(paused);
@@ -251,13 +283,14 @@ TEST_CASE_METHOD(ServerTestAccess, "draining never resumes ingress", "[backpress
     REQUIRE(interest(false));
     paused = true;
     drainState();
-    queue.buffer = "last record\n";
+    const auto record = frameBytes();
+    REQUIRE(queue.appendFrame(std::as_bytes(std::span(record))));
     // Shutdown has already unregistered the listener; trying to resume would fail.
     REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, listener.fds[0], nullptr) == 0);
     REQUIRE(event(pipe.fds[1], EPOLLOUT));
     REQUIRE(queue.empty());
     REQUIRE(paused);
-    REQUIRE(readPipe() == "last record\n");
+    REQUIRE(readPipe() == record);
     REQUIRE((readyEvents(pipe.fds[1]) & EPOLLOUT) == 0U);
 }
 
@@ -280,10 +313,11 @@ TEST_CASE_METHOD(ServerTestAccess, "paused clients still process disconnect even
 
 TEST_CASE_METHOD(ServerTestAccess, "hard queue limit is a fatal enqueue failure", "[backpressure]")
 {
-    queue.buffer.assign(IpcQueue::maxBufferSize, 'x');
-    const std::string original = queue.buffer;
-    REQUIRE_FALSE(enqueue("overflow"));
-    REQUIRE(queue.buffer == original);
+    queue.data.assign(IpcQueue::maxBufferSize, std::byte{'x'});
+    const auto original = queue.data;
+    const auto overflow = frameBytes();
+    REQUIRE_FALSE(enqueue(std::as_bytes(std::span(overflow))));
+    REQUIRE(queue.data == original);
     REQUIRE(readPipe().empty());
 }
 
@@ -293,8 +327,8 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress update failures propagate from event
     SECTION("pause failure")
     {
         fillPipe();
-        queue.buffer.assign(IpcQueue::pauseIngressThreshold - 2, 'x');
-        send(client.fds[1], "a\n");
+        queue.data.assign(IpcQueue::pauseIngressThreshold - frameSize, std::byte{'x'});
+        send(client.fds[1], frameBytes());
         REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, listener.fds[0], nullptr) == 0);
         REQUIRE_FALSE(event(clientFd, EPOLLIN));
         REQUIRE_FALSE(paused);

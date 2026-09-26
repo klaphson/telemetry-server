@@ -1,7 +1,10 @@
 #ifndef SERVER_HPP
 #define SERVER_HPP
 
+#include "Buffer.hpp"
+
 #include <cstdint>
+#include <span>
 #include <string>
 #include <unordered_map>
 
@@ -28,7 +31,7 @@ class Server
     enum class State { Running, Draining };
 
     struct ClientState {
-        std::string inputBuffer;
+        Buffer inputBuffer;
     };
 
     std::unordered_map<int, ClientState> m_clients;
@@ -55,7 +58,8 @@ class Server
     void removeAllClients(int epollFd);
 
     // Pipe output
-    bool enqueueRecord(int epoll_fd, int pipe_fd, IpcQueue &queue, const std::string &record) const;
+    bool enqueueFrame(int epoll_fd, int pipe_fd, IpcQueue &queue,
+                      std::span<const std::byte> frame) const;
     bool flushIpcQueue(int pipe_fd, IpcQueue &queue) const;
     bool updatePipeInterest(int epoll_fd, int pipe_fd, bool want_epollout) const;
 

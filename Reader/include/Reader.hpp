@@ -1,8 +1,9 @@
 #ifndef READER_HPP
 #define READER_HPP
 
-#include <array>
-#include <string>
+#include <cstddef>
+#include <span>
+#include <vector>
 
 class Reader
 {
@@ -19,10 +20,10 @@ class Reader
     int run(int pipeReadFd) const;
 
   private:
-    int m_pipeReadFd;
+    bool readFrames(std::span<const std::byte> bytes, std::vector<std::byte> &pending,
+                    std::size_t &offset) const;
+
     constexpr static std::size_t bufferSize = 4096;
-    void readLine(std::string &pending, const std::array<char, bufferSize> &buffer,
-                  ssize_t bytesRead) const;
 };
 
 #endif // READER_HPP

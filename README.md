@@ -1,42 +1,57 @@
 # telemetry-server
 
-An educational Linux telemetry server written in C++20. It accepts
-newline-delimited TCP records on port 9000 and forwards them through a pipe to a
-reader process that prints them.
+An educational Linux telemetry server written in C++20. It accepts fixed-size
+binary telemetry frames on TCP port 9000, validates them, and forwards them through
+a pipe to a reader process that decodes and prints the records.
 
 ## Architecture
 
-Two static libraries, `Server` and `Reader`, are linked into one executable,
-`telemetry-server`.
-
-The `Protocol` directory defines a separate static library with a binary telemetry
-codec and its unit tests. The server and reader still exchange newline-delimited
-text; the binary codec is not yet integrated into the TCP or pipe data path.
+Three static libraries, `Server`, `Reader`, and `Protocol`, are linked into one
+executable, `telemetry-server`. Both `Server` and `Reader` use the binary codec
+provided by `Protocol`. TCP connections and the IPC pipe carry the same 32-byte
+frames.
 
 ```text
 TCP clients → Server (parent process) → pipe → Reader (child process) → stdout
 ```
 
 `src/main.cpp` creates the pipe and calls `fork()`. The parent calls
-`Server::run(pipeWriteFd)`; the child calls `Reader::run(pipeReadFd)` directly.
+`Server::run(pipeWriteFd, signalFd)`; the child calls `Reader::run(pipeReadFd)` directly.
 Both processes run the same executable, without launching a separate Reader
 executable through `exec()`.
 
 - `main()` owns the pipe descriptors, closes unused ends, and waits for the child
   with `waitpid()` when the server returns. It ignores `SIGPIPE` so a closed reader
-  is reported as a write error.
+  is reported as a write error. It blocks `SIGINT` and `SIGTERM` before forking and
+  gives the parent a `signalfd` for shutdown notifications.
 - `Server` uses nonblocking sockets and `epoll` to accept connections, read
-  records, and write queued data to the pipe. `handleEvent()` dispatches one
+  binary frames, and write queued data to the pipe. `handleEvent()` dispatches one
   event; `run()` owns the wait loop and cleanup.
 - `Server::m_clients` stores each client's input buffer. `ClientState` is a
   private nested struct. Disconnection and shutdown close client sockets and
   remove their entries; the destructor closes any remaining client sockets.
-- `IpcQueue`, defined in `Server/include/IpcQueue.hpp`, buffers outgoing records
+- `Buffer`, defined in `Server/include/Buffer.hpp`, holds bytes in `data`, tracks
+  the consumed prefix with `offset`, and compacts it when needed. Client input
+  uses a 4 KiB compaction threshold; `IpcQueue` inherits `Buffer` and uses 64 KiB.
+- `IpcQueue`, defined in `Server/include/IpcQueue.hpp`, buffers outgoing frames
   and tracks partial writes. It is local to `Server::run()`.
-- `Reader` performs blocking pipe reads and assembles complete lines for output.
+- `Reader` performs blocking pipe reads. Its private `readFrames()` method
+  accumulates bytes, decodes complete frames, prints their fields, and compacts
+  its pending buffer. Invalid IPC frames or EOF with a partial frame cause a
+  failure exit.
 
 The libraries borrow their pipe descriptors; `main()` closes them. Client
 connections belong to `Server`.
+
+On `SIGINT` or `SIGTERM`, the server stops accepting clients, closes existing
+client connections, and drains its queued IPC data. The parent then closes the
+pipe write end so the reader can finish and receive EOF. Input that has not been
+queued is not part of this drain.
+
+`main()` configures stdout for line buffering before `fork()`, including when
+output is redirected to a file. Log lines are flushed at newlines instead of after
+each `<<` insertion, preventing the observed mixing of server and reader log
+fragments. Ordering between the two processes can still vary.
 
 ## Project layout
 
@@ -46,26 +61,28 @@ src/main.cpp                  Pipe creation and process management
 Server/
     CMakeLists.txt            Server static library
     include/Server.hpp        Server interface and client state
+    include/Buffer.hpp        Shared byte storage, offset tracking, and compaction
     include/IpcQueue.hpp      Outgoing pipe queue
     src/Server.cpp            TCP and epoll handling
     test/                     Catch2 queue and backpressure unit tests
 Reader/
     CMakeLists.txt            Reader static library
     include/Reader.hpp        Reader interface
-    src/Reader.cpp            Pipe reads and line processing
+    src/Reader.cpp            Pipe reads, frame assembly, and decoding
 Protocol/
     CMakeLists.txt            Protocol static library
     include/TelemetryRecord.hpp  Telemetry data fields and equality comparison
-    include/TelemetryCode.hpp    Binary codec API and frame constants
-    src/TelemetryCode.cpp     Binary encoding, decoding, and error descriptions
+    include/TelemetryCodec.hpp    Binary codec API and frame constants
+    src/TelemetryCodec.cpp     Binary encoding, decoding, and error descriptions
     test/TelemetryCodecTest.cpp  Catch2 codec unit tests
-tests/process_smoke.sh        Process and TCP integration test
+tests/process_smoke.sh        Binary TCP/pipe flow and reader-failure integration test
+tests/graceful_shutdown.sh    SIGTERM drain and reader EOF integration test
 ```
 
 ## Build and run on Linux
 
 Requirements: a C++20 compiler, CMake 3.24 or newer, Ninja, and Make.
-The server uses Linux APIs including `epoll`, `accept4()`, and `pipe2()`.
+The server uses Linux APIs including `epoll`, `accept4()`, `pipe2()`, and `signalfd()`.
 
 From the project root:
 
@@ -94,28 +111,88 @@ cmake --build build-sanitized
 
 ## Send telemetry
 
-With the server running, send records from another Bash terminal in the same
-host or container:
+With the server running, use another **Bash** terminal on the same host or inside
+the same container. These examples use Bash's `/dev/tcp` support. Every frame is
+32 bytes, without a newline or separator.
+
+### One complete frame
 
 ```bash
-printf 'temperature=23\nhumidity=50\n' > /dev/tcp/127.0.0.1/9000
+exec 3<>/dev/tcp/127.0.0.1/9000
+printf '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x03\x3f\xf0\x00\x00\x00\x00\x00\x00' >&3
+exec 3>&-
 ```
 
-The server terminal should show Reader output such as:
+Expected reader output:
 
 ```text
-[reader] telemetry: temperature=23
-[reader] telemetry: humidity=50
+[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1
 ```
 
-Records must end with a newline. The server strips a trailing carriage return
-from CRLF records and ignores empty lines. It disconnects clients whose input
-buffer exceeds 64 KiB. The outgoing pipe queue is limited to 4 MiB; records that
-would exceed that limit are dropped with a log message.
+### One frame in two steps
+
+Run both steps in the same Bash session. First, open the connection and send the
+first 16 bytes:
+
+```bash
+exec 3<>/dev/tcp/127.0.0.1/9000
+printf '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02' >&3
+```
+
+Then send the remaining 16 bytes and close the connection:
+
+```bash
+printf '\x00\x00\x00\x00\x00\x00\x00\x03\x3f\xf0\x00\x00\x00\x00\x00\x00' >&3
+exec 3>&-
+```
+
+The server waits until the complete frame is available before decoding it.
+
+### Two frames with one printf
+
+`%b` interprets the byte escapes in each argument. This sends 64 bytes containing
+two frames, with timestamps `3` and `4` and values `1.0` and `2.0`:
+
+```bash
+exec 3<>/dev/tcp/127.0.0.1/9000
+printf '%b%b' \
+    '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x03\x3f\xf0\x00\x00\x00\x00\x00\x00' \
+    '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x04\x40\x00\x00\x00\x00\x00\x00\x00' >&3
+exec 3>&-
+```
+
+Expected reader output:
+
+```text
+[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1
+[reader] telemetry: sensor=1 metric=2 timestamp_ns=4 value=2
+```
+
+One `printf` does not guarantee one TCP read. The server assembles fragmented
+frames and processes multiple complete frames received together. The reader
+also handles partial frames and multiple frames in each pipe read.
+
+Keep each quoted byte string on one line. A backslash followed by a newline
+**inside single quotes** adds literal bytes `5c 0a`, corrupting the frame.
+For example, inserting them after `TLRY` produces `unsupported version`, since
+version bytes must be `00 01`. Shell continuation backslashes belong outside the
+quotes, as in the two-frame example. Use `>&3` to write to the open connection.
+
+### Limits and errors
+
+- Invalid frame headers disconnect the client with a protocol-error log.
+- A client that reaches EOF with an incomplete frame is disconnected and its
+  trailing bytes are discarded; the server logs the partial frame.
+- The server disconnects clients whose pending input exceeds 64 KiB.
+- At 3 MiB of pending IPC data, the server pauses accepting and reading clients
+  after processing the complete frames in the current receive. It resumes when
+  pending data falls to 1 MiB or below, unless it is shutting down.
+- The IPC queue allows at most 4 MiB of pending data. An enqueue that would exceed
+  this hard limit fails and stops the server with an error.
 
 ## Binary telemetry codec
 
-The API in `Protocol/include/TelemetryCode.hpp` lives in the
+The API in `Protocol/include/TelemetryCodec.hpp` lives in the
 `telemetry::protocol` namespace. `TelemetryRecord` contains `sensorId` and
 `metricId` (`std::uint32_t`), `timestampNs` (`std::uint64_t`, in nanoseconds),
 and `value` (`double`).
@@ -149,7 +226,7 @@ conversion is true when `error == DecodeError::None`. `toString(error)` provides
 a readable error description. For example:
 
 ```cpp
-#include "TelemetryCode.hpp"
+#include "TelemetryCodec.hpp"
 
 #include <iostream>
 
@@ -188,8 +265,10 @@ Catch2 unit tests cover:
 - The binary codec: known wire bytes, integer boundaries, exact floating-point
   bits, truncated and oversized input, invalid headers, unaligned input, and
   error descriptions.
-- IPC queue thresholds and server backpressure: pause/resume, record preservation,
-  shutdown, and error propagation, using nonblocking pipes and socket pairs.
+- Shared buffer compaction, IPC queue thresholds, and reuse of consumed capacity.
+- Server backpressure: pause/resume, exact binary frame preservation, partial
+  frames across a pause, stopping before the next receive, shutdown, and error
+  propagation, using nonblocking pipes and socket pairs.
 
 These unit tests do not bind port 9000. Run all Catch2 tests with:
 
@@ -197,19 +276,10 @@ These unit tests do not bind port 9000. Run all Catch2 tests with:
 ctest --test-dir build -R '^(TelemetryCodecTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
 ```
 
-The root `CMakeLists.txt` currently does not include `Protocol`. To enable the
-library and its nine codec test cases, add this line after the Catch2 setup and
-before the existing `add_subdirectory(Server)` call:
-
-```cmake
-add_subdirectory(Protocol)
-```
-
-Then configure, build, and run the codec tests:
+`Protocol` and its codec tests are already included by the root CMake setup.
+Run just the codec tests after building:
 
 ```bash
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
-cmake --build build --target telemetry_protocol_test
 ctest --test-dir build -R '^TelemetryCodecTest\.' --output-on-failure
 ```
 
@@ -217,10 +287,21 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The Bash smoke test sends fragmented input and multiple records, checks Reader
-output, then terminates the Reader to verify that the parent reports failure.
-It requires Linux `/proc`, Bash TCP redirection, and a free port 9000. CTest sets
-a 15-second timeout.
+The suite currently has 25 tests: 23 Catch2 cases and two process integration tests.
+The Bash smoke test sends a fragmented binary frame followed by another frame,
+checks decoded reader output, then terminates the reader to verify that the parent
+reports failure. The graceful-shutdown test sends a valid frame, waits for its
+output, sends `SIGTERM`, and checks the drain messages, reader EOF, and successful
+process exit.
+
+The process tests require Linux `/proc`, Bash TCP redirection, and a free port
+9000. CTest gives each a 15-second timeout and a shared resource lock so they do
+not run concurrently. To check for intermittent process or logging failures:
+
+```bash
+ctest --test-dir build --output-on-failure \
+    -R '^telemetry_(process_smoke|graceful_shutdown)$' --repeat until-fail:100
+```
 
 ## Docker development
 
@@ -294,8 +375,8 @@ strace -f -e trace=process ./build/telemetry-server
 
 ## C++ note: `[[nodiscard]]`
 
-`IpcQueue::empty()` and `IpcQueue::pendingBytes()` use `[[nodiscard]]` to warn
-when a caller ignores their results:
+`Buffer::empty()` and `Buffer::pendingBytes()`, inherited by `IpcQueue`, use
+`[[nodiscard]]` to warn when a caller ignores their results:
 
 ```cpp
 const bool isEmpty = queue.empty();

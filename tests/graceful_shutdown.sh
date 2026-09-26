@@ -45,13 +45,13 @@ grep -q 'listening on' "$log" || {
 
 exec 3<>/dev/tcp/127.0.0.1/9000
 
-printf 'temperature=23\n' >&3
+printf '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x03\x3f\xf0\x00\x00\x00\x00\x00\x00' >&3
 
 exec 3>&-
 
 for ((attempt = 0; attempt < 100; ++attempt)); do
     if grep -qF \
-        '[reader] telemetry: temperature=23' \
+        '[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1' \
         "$log"; then
         break
     fi
@@ -60,7 +60,7 @@ for ((attempt = 0; attempt < 100; ++attempt)); do
 done
 
 grep -qF \
-    '[reader] telemetry: temperature=23' \
+    '[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1' \
     "$log"
 
 kill -TERM "$server_pid"

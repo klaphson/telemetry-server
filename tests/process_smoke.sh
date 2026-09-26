@@ -39,19 +39,22 @@ reader_pid=${reader_pid// /}
 [[ -n "$reader_pid" ]]
 
 exec 3<>/dev/tcp/127.0.0.1/9000
-printf 'temperature=' >&3
+# Send half a frame, then its remainder and a second complete frame.
+printf '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02' >&3
 sleep 0.05
-printf '23\r\nhumidity=50\n' >&3
+printf '%b%b' \
+    '\x00\x00\x00\x00\x00\x00\x00\x03\x3f\xf0\x00\x00\x00\x00\x00\x00' \
+    '\x54\x4c\x52\x59\x00\x01\x00\x20\x00\x00\x00\x01\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x04\x40\x00\x00\x00\x00\x00\x00\x00' >&3
 exec 3>&-
 for ((attempt = 0; attempt < 100; ++attempt)); do
-    if grep -qF '[reader] telemetry: temperature=23' "$log" &&
-       grep -qF '[reader] telemetry: humidity=50' "$log"; then
+    if grep -qF '[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1' "$log" &&
+       grep -qF '[reader] telemetry: sensor=1 metric=2 timestamp_ns=4 value=2' "$log"; then
         break
     fi
     sleep 0.05
 done
-grep -qF '[reader] telemetry: temperature=23' "$log"
-grep -qF '[reader] telemetry: humidity=50' "$log"
+grep -qF '[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1' "$log"
+grep -qF '[reader] telemetry: sensor=1 metric=2 timestamp_ns=4 value=2' "$log"
 
 # A failed reader must wake the server and produce a failed process exit.
 kill -KILL "$reader_pid"

@@ -49,7 +49,12 @@ int main()
         return EXIT_FAILURE;
     }
 
-    std::cout << std::unitbuf;
+    // Flush complete lines, including when redirected to a file. Flushing each
+    // insertion lets the server and reader interleave fragments of their logs.
+    if (std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ) != 0) {
+        std::cerr << "[main] failed to configure stdout line buffering\n";
+        return EXIT_FAILURE;
+    }
 
     int pipeFds[2]{};
     if (pipe2(pipeFds, O_CLOEXEC) == -1) {
