@@ -3,3 +3,4 @@ cmake-build-*/
 .vscode/
 .idea/
 *.log
+telemetry.bin
