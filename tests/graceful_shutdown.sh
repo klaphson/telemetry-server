@@ -5,6 +5,9 @@ set -euo pipefail
 log=$(mktemp)
 server_pid=
 
+data_file=$(mktemp)
+rm -f "$data_file"
+
 cleanup() {
     local status=$?
 
@@ -17,12 +20,15 @@ cleanup() {
         cat "$log" >&2
     fi
     rm -f "$log"
+    rm -f "$data_file"
     exit "$status"
 }
 
 trap cleanup EXIT
 
-"$1" >"$log" 2>&1 &
+"$1" \
+    --data-file "$data_file" \
+    >"$log" 2>&1 &
 server_pid=$!
 
 for ((attempt = 0; attempt < 100; ++attempt)); do
@@ -72,6 +78,10 @@ if ! wait "$server_pid"; then
 fi
 
 server_pid=
+
+[[ -f "$data_file" ]]
+size=$(stat -c '%s' "$data_file")
+[[ "$size" -eq 32 ]]
 
 grep -qF \
     '[server] shutdown requested signal=' \

@@ -2,21 +2,25 @@
 
 An educational Linux telemetry server written in C++20. It accepts fixed-size
 binary telemetry frames on TCP port 9000, validates them, and forwards them through
-a pipe to a reader process that decodes and prints the records.
+a pipe to a reader process that decodes the records, appends their binary frames
+to a file, and prints their fields.
 
 ## Architecture
 
-Three static libraries, `Server`, `Reader`, and `Protocol`, are linked into one
-executable, `telemetry-server`. Both `Server` and `Reader` use the binary codec
-provided by `Protocol`. TCP connections and the IPC pipe carry the same 32-byte
-frames.
+Four static libraries, `Server`, `Reader`, `Protocol`, and `Storage`, are linked
+into one executable, `telemetry-server`. Both `Server` and `Reader` use the binary
+codec provided by `Protocol`; `Reader` uses `Storage` to persist frames. TCP
+connections, the IPC pipe, and the data file use the same 32-byte frames.
 
 ```text
-TCP clients → Server (parent process) → pipe → Reader (child process) → stdout
+TCP clients → Server (parent process) → pipe → Reader (child process)
+                                                ├→ Storage → data file
+                                                └→ stdout
 ```
 
 `src/main.cpp` creates the pipe and calls `fork()`. The parent calls
-`Server::run(pipeWriteFd, signalFd)`; the child calls `Reader::run(pipeReadFd)` directly.
+`Server::run(pipeWriteFd, signalFd)`; the child calls
+`Reader::run(pipeReadFd, dataFilePath)` directly.
 Both processes run the same executable, without launching a separate Reader
 executable through `exec()`.
 
@@ -36,16 +40,20 @@ executable through `exec()`.
 - `IpcQueue`, defined in `Server/include/IpcQueue.hpp`, buffers outgoing frames
   and tracks partial writes. It is local to `Server::run()`.
 - `Reader` performs blocking pipe reads. Its private `readFrames()` method
-  accumulates bytes, decodes complete frames, prints their fields, and compacts
-  its pending buffer. Invalid IPC frames or EOF with a partial frame cause a
-  failure exit.
+  accumulates bytes, decodes complete frames, appends them to storage, prints
+  their fields, and compacts its pending buffer. Invalid IPC frames, EOF with a
+  partial frame, or storage errors cause a failure exit.
+- `FileStore`, provided by `Storage`, owns the data file descriptor. It appends
+  complete frames, removes an incomplete trailing frame when opening the file,
+  and exposes `sync()` for `fdatasync()` at clean reader EOF.
 
 The libraries borrow their pipe descriptors; `main()` closes them. Client
 connections belong to `Server`.
 
 On `SIGINT` or `SIGTERM`, the server stops accepting clients, closes existing
 client connections, and drains its queued IPC data. The parent then closes the
-pipe write end so the reader can finish and receive EOF. Input that has not been
+pipe write end so the reader can finish and receive EOF. The reader syncs its
+data file before logging EOF and returning success. Input that has not been
 queued is not part of this drain.
 
 `main()` configures stdout for line buffering before `fork()`, including when
@@ -57,7 +65,7 @@ fragments. Ordering between the two processes can still vary.
 
 ```text
 CMakeLists.txt                 Project settings, executable, and tests
-src/main.cpp                  Pipe creation and process management
+src/main.cpp                  CLI parsing, pipe creation, and process management
 Server/
     CMakeLists.txt            Server static library
     include/Server.hpp        Server interface and client state
@@ -68,15 +76,20 @@ Server/
 Reader/
     CMakeLists.txt            Reader static library
     include/Reader.hpp        Reader interface
-    src/Reader.cpp            Pipe reads, frame assembly, and decoding
+    src/Reader.cpp            Pipe reads, frame decoding, and persistence
 Protocol/
     CMakeLists.txt            Protocol static library
     include/TelemetryRecord.hpp  Telemetry data fields and equality comparison
     include/TelemetryCodec.hpp    Binary codec API and frame constants
     src/TelemetryCodec.cpp     Binary encoding, decoding, and error descriptions
     test/TelemetryCodecTest.cpp  Catch2 codec unit tests
+Storage/
+    CMakeLists.txt            Storage static library
+    include/FileStore.hpp    Append and sync API, data file ownership
+    src/FileStore.cpp        File writes, syncing, and partial-tail recovery
+    test/FileStoreTest.cpp   Catch2 storage unit tests
 tests/process_smoke.sh        Binary TCP/pipe flow and reader-failure integration test
-tests/graceful_shutdown.sh    SIGTERM drain and reader EOF integration test
+tests/graceful_shutdown.sh    SIGTERM drain, reader EOF, and persisted-size test
 ```
 
 ## Build and run on Linux
@@ -93,6 +106,17 @@ make build
 
 `make run` builds and starts the server in one command. Stop the foreground
 application with Ctrl+C.
+
+By default, the reader creates or appends to `telemetry.bin` in the current
+working directory. To select a different file:
+
+```bash
+./build/telemetry-server --data-file /tmp/telemetry.bin
+```
+
+The parent directory must already exist, and the reader must have permission to
+create or append to the file. The CLI accepts either no arguments or
+`--data-file PATH`.
 
 The equivalent CMake commands are:
 
@@ -246,6 +270,25 @@ void codecExample()
 
 Link the `Protocol` CMake target to use the codec and its public include directory.
 
+## File storage
+
+The data file contains consecutive 32-byte wire frames, including each frame's
+protocol header, with no extra file header or separators. The reader validates
+each frame and appends its original bytes before printing the telemetry log.
+Restarting the server with the same path preserves complete frames and appends
+new ones. New files are created with mode `0640`, subject to the process umask.
+
+When opening a file whose size is not a multiple of 32, `FileStore` truncates the
+trailing incomplete frame and logs the number of removed bytes. Recovery checks
+file length only; it does not validate existing complete frames or repair their
+contents. Use a dedicated telemetry file for the data path.
+
+Writes handle partial writes and retry interrupted system calls. On clean pipe
+EOF, the reader calls `fdatasync()` before reporting success. There is no sync
+after each frame, so a printed record does not guarantee durability after a
+system crash or power loss. Opening, appending, recovery, or sync failures make
+the reader exit with failure; the parent reports a failed reader when it exits.
+
 ## Tests
 
 Stop any server using port 9000 before running:
@@ -266,6 +309,8 @@ Catch2 unit tests cover:
   bits, truncated and oversized input, invalid headers, unaligned input, and
   error descriptions.
 - Shared buffer compaction, IPC queue thresholds, and reuse of consumed capacity.
+- File storage: exact bytes and size after appending two frames, and removal of
+  an incomplete trailing frame on open.
 - Server backpressure: pause/resume, exact binary frame preservation, partial
   frames across a pause, stopping before the next receive, shutdown, and error
   propagation, using nonblocking pipes and socket pairs.
@@ -273,7 +318,7 @@ Catch2 unit tests cover:
 These unit tests do not bind port 9000. Run all Catch2 tests with:
 
 ```bash
-ctest --test-dir build -R '^(TelemetryCodecTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+ctest --test-dir build -R '^(TelemetryCodecTest|FileStoreTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
 ```
 
 `Protocol` and its codec tests are already included by the root CMake setup.
@@ -283,20 +328,31 @@ Run just the codec tests after building:
 ctest --test-dir build -R '^TelemetryCodecTest\.' --output-on-failure
 ```
 
+Run just the storage tests after building:
+
+```bash
+ctest --test-dir build -R '^FileStoreTest\.' --output-on-failure
+```
+
 CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 25 tests: 23 Catch2 cases and two process integration tests.
+The suite currently has 27 tests: 25 Catch2 cases and two process integration tests.
 The Bash smoke test sends a fragmented binary frame followed by another frame,
 checks decoded reader output, then terminates the reader to verify that the parent
 reports failure. The graceful-shutdown test sends a valid frame, waits for its
 output, sends `SIGTERM`, and checks the drain messages, reader EOF, and successful
-process exit.
+process exit. It uses a temporary data path and, after successfully waiting for
+the server to exit, checks that the file exists and contains exactly 32 bytes.
+Cleanup removes that temporary file. The smoke test uses the default data path,
+so it creates or appends to `telemetry.bin` in its working directory (`build`
+when run through the CTest command above).
 
-The process tests require Linux `/proc`, Bash TCP redirection, and a free port
-9000. CTest gives each a 15-second timeout and a shared resource lock so they do
-not run concurrently. To check for intermittent process or logging failures:
+The process tests require Linux `/proc`, Bash TCP redirection, `stat -c` support,
+and a free port 9000. CTest gives each a 15-second timeout and a shared resource
+lock so they do not run concurrently. To check for intermittent process or
+logging failures:
 
 ```bash
 ctest --test-dir build --output-on-failure \

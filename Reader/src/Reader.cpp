@@ -1,4 +1,6 @@
 #include "Reader.hpp"
+
+#include "FileStore.hpp"
 #include "TelemetryCodec.hpp"
 
 #include <unistd.h>
@@ -11,14 +13,18 @@
 #include <span>
 #include <vector>
 
-int Reader::run(int pipeReadFd) const
+int Reader::run(int pipeReadFd, std::string_view dataFilePath) const
 {
     std::cout << "[reader] pid=" << getpid() << '\n';
+
+    FileStore store;
+    if (!store.openFile(dataFilePath)) {
+        return EXIT_FAILURE;
+    }
 
     std::cout << "[reader] reading binary telemetry from pipe\n";
 
     std::array<std::byte, bufferSize> buffer{};
-
     std::vector<std::byte> pending;
     std::size_t offset = 0;
 
@@ -27,7 +33,8 @@ int Reader::run(int pipeReadFd) const
 
         if (bytesRead > 0) {
             const auto count = static_cast<std::size_t>(bytesRead);
-            if (!readFrames(std::span<const std::byte>(buffer.data(), count), pending, offset)) {
+            if (!readFrames(std::span<const std::byte>(buffer.data(), count), pending, offset,
+                            store)) {
                 return EXIT_FAILURE;
             }
 
@@ -40,6 +47,10 @@ int Reader::run(int pipeReadFd) const
             if (remaining != 0) {
                 std::cerr << "[reader] EOF with partial IPC frame: " << remaining << " bytes\n";
 
+                return EXIT_FAILURE;
+            }
+
+            if (!store.sync()) {
                 return EXIT_FAILURE;
             }
 
@@ -58,7 +69,7 @@ int Reader::run(int pipeReadFd) const
 }
 
 bool Reader::readFrames(std::span<const std::byte> bytes, std::vector<std::byte> &pending,
-                        std::size_t &offset) const
+                        std::size_t &offset, FileStore &store) const
 {
     using namespace telemetry::protocol;
 
@@ -76,8 +87,11 @@ bool Reader::readFrames(std::span<const std::byte> bytes, std::vector<std::byte>
             return false;
         }
 
-        const TelemetryRecord &record = decoded.record;
+        if (!store.appendFrame(frame)) {
+            return false;
+        }
 
+        const TelemetryRecord &record = decoded.record;
         std::cout << "[reader] telemetry:" << " sensor=" << record.sensorId
                   << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
                   << " value=" << record.value << '\n';

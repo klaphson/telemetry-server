@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
+#include <string_view>
 
 namespace
 {
@@ -34,8 +35,25 @@ bool blockShutdownSignals(sigset_t &mask)
 
 } // namespace
 
-int main()
+int main(int argc, char* argv[])
 {
+    std::string_view dataFilePath = "telemetry.bin";
+
+    if (argc == 3) {
+        if (std::string_view{argv[1]} != "--data-file") {
+
+            std::cerr << "usage: " << argv[0] << " [--data-file PATH]\n";
+
+            return EXIT_FAILURE;
+        }
+
+        dataFilePath = argv[2];
+    } else if (argc != 1) {
+        std::cerr << "usage: " << argv[0] << " [--data-file PATH]\n";
+
+        return EXIT_FAILURE;
+    }
+
     // Report a closed reader through write() instead of terminating on SIGPIPE.
     if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         perror("signal");
@@ -72,7 +90,7 @@ int main()
 
     if (readerPid == 0) {
         close(pipeFds[1]);
-        const int result = Reader{}.run(pipeFds[0]);
+        const int result = Reader{}.run(pipeFds[0], dataFilePath);
         close(pipeFds[0]);
         std::cout.flush();
         std::cerr.flush();

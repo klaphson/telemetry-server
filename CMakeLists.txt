@@ -35,6 +35,7 @@ if(BUILD_TESTING)
 endif()
 
 add_subdirectory(Protocol)
+add_subdirectory(Storage)
 add_subdirectory(Server)
 add_subdirectory(Reader)
 

@@ -3,7 +3,10 @@
 
 #include <cstddef>
 #include <span>
+#include <string_view>
 #include <vector>
+
+class FileStore;
 
 class Reader
 {
@@ -17,11 +20,11 @@ class Reader
     Reader &operator=(Reader &&) = delete;
 
     // Borrows the descriptor; the caller closes it after run() returns.
-    int run(int pipeReadFd) const;
+    int run(int pipeReadFd, std::string_view dataFilePath) const;
 
   private:
     bool readFrames(std::span<const std::byte> bytes, std::vector<std::byte> &pending,
-                    std::size_t &offset) const;
+                    std::size_t &offset, FileStore &store) const;
 
     constexpr static std::size_t bufferSize = 4096;
 };
