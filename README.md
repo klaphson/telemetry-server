@@ -3,7 +3,7 @@
 An educational Linux telemetry server written in C++20. It accepts fixed-size
 binary telemetry frames on TCP port 9000, validates them, and forwards them through
 a pipe to a reader process that decodes the records, appends their binary frames
-to a file, and prints their fields.
+to rotating files, and prints their fields.
 
 ## Architecture
 
@@ -14,7 +14,7 @@ connections, the IPC pipe, and the data file use the same 32-byte frames.
 
 ```text
 TCP clients → Server (parent process) → pipe → Reader (child process)
-                                                ├→ Storage → data file
+                                                ├→ Storage → active file + archived segments
                                                 └→ stdout
 ```
 
@@ -43,9 +43,11 @@ executable through `exec()`.
   accumulates bytes, decodes complete frames, appends them to storage, prints
   their fields, and compacts its pending buffer. Invalid IPC frames, EOF with a
   partial frame, or storage errors cause a failure exit.
-- `FileStore`, provided by `Storage`, owns the data file descriptor. It appends
-  complete frames, removes an incomplete trailing frame when opening the file,
-  and exposes `sync()` for `fdatasync()` at clean reader EOF.
+- `FileStore`, provided by `Storage`, owns the active file and parent directory
+  descriptors. It appends complete frames, recovers an incomplete trailing frame
+  on open, rotates files at a configurable size limit, and syncs after a
+  configurable number of appended bytes. It also exposes `sync()` for
+  `fdatasync()` at clean reader EOF.
 
 The libraries borrow their pipe descriptors; `main()` closes them. Client
 connections belong to `Server`.
@@ -85,8 +87,8 @@ Protocol/
     test/TelemetryCodecTest.cpp  Catch2 codec unit tests
 Storage/
     CMakeLists.txt            Storage static library
-    include/FileStore.hpp    Append and sync API, data file ownership
-    src/FileStore.cpp        File writes, syncing, and partial-tail recovery
+    include/FileStore.hpp    Storage configuration, append and sync API
+    src/FileStore.cpp        File writes, rotation, syncing, and partial-tail recovery
     test/FileStoreTest.cpp   Catch2 storage unit tests
 tests/process_smoke.sh        Binary TCP/pipe flow and reader-failure integration test
 tests/graceful_shutdown.sh    SIGTERM drain, reader EOF, and persisted-size test
@@ -114,9 +116,10 @@ working directory. To select a different file:
 ./build/telemetry-server --data-file /tmp/telemetry.bin
 ```
 
-The parent directory must already exist, and the reader must have permission to
-create or append to the file. The CLI accepts either no arguments or
-`--data-file PATH`.
+The parent directory must already exist. The reader needs permission to read and
+search the directory, create and rename files there, and append to the active
+file. The CLI accepts either no arguments or `--data-file PATH`; rotation and
+sync settings use the defaults described below.
 
 The equivalent CMake commands are:
 
@@ -272,22 +275,71 @@ Link the `Protocol` CMake target to use the codec and its public include directo
 
 ## File storage
 
-The data file contains consecutive 32-byte wire frames, including each frame's
-protocol header, with no extra file header or separators. The reader validates
-each frame and appends its original bytes before printing the telemetry log.
-Restarting the server with the same path preserves complete frames and appends
-new ones. New files are created with mode `0640`, subject to the process umask.
+The active file and archived segments contain consecutive 32-byte wire frames,
+including each frame's protocol header, with no extra file header or separators.
+The reader validates each frame and appends its original bytes before printing
+the telemetry log. Restarting the server with the same path preserves complete
+frames and resumes appending, rotating before the next append if needed. New
+files are created with mode `0640`, subject to the process umask.
+
+### Configuration and rotation
+
+`FileStore` accepts an optional `FileStoreConfig` in its constructor. The reader
+uses the defaults; these settings are not exposed as CLI options.
+
+| Setting | Default | Requirements |
+| --- | --- | --- |
+| `maxSegmentBytes` | 64 MiB (`64 * 1024 * 1024`) | At least 32 bytes and a multiple of 32 |
+| `syncEveryBytes` | 1 MiB (`1 * 1024 * 1024`) | Zero to disable byte-based syncing, or at most `maxSegmentBytes` |
+
+`openFile()` rejects invalid configuration. For example, a library caller can
+configure smaller segments and a shorter sync interval:
+
+```cpp
+FileStore store{FileStoreConfig{
+    .maxSegmentBytes = 8 * 1024 * 1024,
+    .syncEveryBytes = 256 * 1024,
+}};
+```
+
+Before appending a frame that would exceed `maxSegmentBytes`, storage syncs and
+closes the active file, renames it in the same directory, and creates a new file
+at the original path. Frames are never split across segments. A file exactly at
+the limit rotates on the next append. An existing file larger than the limit
+also rotates on the next append; it is not split into smaller archives.
+
+Archive names have the form
+`<filename>.<seconds>.<nanoseconds>.<sequence>.segment`. The timestamp comes from
+`CLOCK_REALTIME`, and the sequence starts at zero for each `FileStore` instance.
+For example, `telemetry.bin` can become
+`telemetry.bin.1700000000.123456789.0.segment`. Archives are retained indefinitely;
+the segment limit does not cap total disk usage. Use one writer per data path.
+
+### Recovery and durability
 
 When opening a file whose size is not a multiple of 32, `FileStore` truncates the
-trailing incomplete frame and logs the number of removed bytes. Recovery checks
-file length only; it does not validate existing complete frames or repair their
-contents. Use a dedicated telemetry file for the data path.
+trailing incomplete frame, syncs the truncated file, and logs the number of
+removed bytes. The active data path must refer to a regular file. Recovery checks
+file length only; it does not validate existing complete frames, repair their
+contents, or inspect archived segments. Use a dedicated telemetry file for the
+data path.
 
-Writes handle partial writes and retry interrupted system calls. On clean pipe
-EOF, the reader calls `fdatasync()` before reporting success. There is no sync
-after each frame, so a printed record does not guarantee durability after a
-system crash or power loss. Opening, appending, recovery, or sync failures make
-the reader exit with failure; the parent reports a failed reader when it exits.
+Writes handle partial writes and retry interrupted system calls. After a complete
+frame brings the bytes appended since the last successful sync to at least
+`syncEveryBytes`, `appendFrame()` calls `fdatasync()` before returning success.
+The interval need not be a multiple of 32; it is checked after each complete
+frame. This is a byte threshold, not a timer.
+
+Storage also calls `fdatasync()` before rotation, and the reader calls it at clean
+pipe EOF. Setting `syncEveryBytes` to zero disables only byte-based syncing.
+The parent directory is synced with `fsync()` after creating an active file and
+after renaming a segment. The `FileStore` destructor closes descriptors without
+an explicit sync; library callers should call `sync()` before successful shutdown.
+
+A printed record may still be awaiting the next sync and therefore does not
+guarantee durability after a system crash or power loss. Opening, appending,
+recovery, rotation, or sync failures make the reader exit with failure; the parent
+reports a failed reader when it exits.
 
 ## Tests
 
@@ -309,8 +361,9 @@ Catch2 unit tests cover:
   bits, truncated and oversized input, invalid headers, unaligned input, and
   error descriptions.
 - Shared buffer compaction, IPC queue thresholds, and reuse of consumed capacity.
-- File storage: exact bytes and size after appending two frames, and removal of
-  an incomplete trailing frame on open.
+- File storage: exact bytes and size after appending two frames, removal of
+  an incomplete trailing frame on open, and rotation before a third frame exceeds
+  a two-frame segment limit, checking the active and archived file sizes.
 - Server backpressure: pause/resume, exact binary frame preservation, partial
   frames across a pause, stopping before the next receive, shutdown, and error
   propagation, using nonblocking pipes and socket pairs.
@@ -338,7 +391,7 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 27 tests: 25 Catch2 cases and two process integration tests.
+The suite currently has 28 tests: 26 Catch2 cases and two process integration tests.
 The Bash smoke test sends a fragmented binary frame followed by another frame,
 checks decoded reader output, then terminates the reader to verify that the parent
 reports failure. The graceful-shutdown test sends a valid frame, waits for its

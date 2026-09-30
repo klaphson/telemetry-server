@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <string_view>
 #include <vector>
 
 namespace
@@ -41,6 +42,43 @@ class TemporaryPath
     }
 
     const std::string &get() const
+    {
+        return m_path;
+    }
+
+  private:
+    std::string m_path;
+};
+
+class TemporaryDirectory
+{
+  public:
+    TemporaryDirectory()
+    {
+        std::array<char, 64> path{"/tmp/telemetry-dir-XXXXXX"};
+
+        char* result = mkdtemp(path.data());
+
+        REQUIRE(result != nullptr);
+
+        m_path = result;
+    }
+
+    ~TemporaryDirectory()
+    {
+        std::error_code error;
+
+        std::filesystem::remove_all(m_path, error);
+    }
+
+    [[nodiscard]]
+    std::filesystem::path file(std::string_view name) const
+    {
+        return std::filesystem::path{m_path} / name;
+    }
+
+    [[nodiscard]]
+    const std::string &path() const
     {
         return m_path;
     }
@@ -122,6 +160,55 @@ TEST_CASE("FileStore removes partial frame tail on open")
     }
 
     REQUIRE(std::filesystem::file_size(path.get()) == kFrameSize);
+}
+
+TEST_CASE("FileStore rotates before a frame would exceed segment size")
+{
+    using namespace telemetry::protocol;
+
+    TemporaryDirectory directory;
+
+    const auto activePath = directory.file("telemetry.bin");
+
+    FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize, .syncEveryBytes = kFrameSize};
+
+    const Frame first = encode(TelemetryRecord{1, 1, 1, 1.0});
+
+    const Frame second = encode(TelemetryRecord{2, 2, 2, 2.0});
+
+    const Frame third = encode(TelemetryRecord{3, 3, 3, 3.0});
+
+    {
+        FileStore store{config};
+
+        REQUIRE(store.openFile(activePath.string()));
+
+        REQUIRE(store.appendFrame(first));
+
+        REQUIRE(store.appendFrame(second));
+
+        REQUIRE(store.appendFrame(third));
+
+        REQUIRE(store.sync());
+    }
+
+    REQUIRE(std::filesystem::file_size(activePath) == kFrameSize);
+
+    std::size_t segmentCount = 0;
+
+    for (const auto &entry : std::filesystem::directory_iterator{directory.path()}) {
+
+        const std::string name = entry.path().filename().string();
+
+        if (name.starts_with("telemetry.bin.") && name.ends_with(".segment")) {
+
+            ++segmentCount;
+
+            REQUIRE(entry.file_size() == 2 * kFrameSize);
+        }
+    }
+
+    REQUIRE(segmentCount == 1);
 }
 
 } // namespace
