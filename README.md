@@ -1,13 +1,13 @@
 # telemetry-server
 
 An educational Linux telemetry server written in C++20. It accepts fixed-size
-binary telemetry frames on TCP port 9000, validates them, and forwards them through
+binary telemetry frames on TCP port 9000 by default, validates them, and forwards them through
 a pipe to a reader process that decodes the records, appends their binary frames
 to rotating files, and prints their fields.
 
 ## Architecture
 
-Four static libraries, `Server`, `Reader`, `Protocol`, and `Storage`, are linked
+Five static libraries, `Config`, `Server`, `Reader`, `Protocol`, and `Storage`, are linked
 into one executable, `telemetry-server`. Both `Server` and `Reader` use the binary
 codec provided by `Protocol`; `Reader` uses `Storage` to persist frames. TCP
 connections, the IPC pipe, and the data file use the same 32-byte frames.
@@ -18,12 +18,17 @@ TCP clients → Server (parent process) → pipe → Reader (child process)
                                                 └→ stdout
 ```
 
-`src/main.cpp` creates the pipe and calls `fork()`. The parent calls
+`src/main.cpp` parses and validates CLI options through `Config`, then creates
+the pipe and calls `fork()`. It passes the selected port to the `Server`
+constructor through `ServerConfig` and the file and storage settings to the
+reader through `ReaderConfig`. The parent calls
 `Server::run(pipeWriteFd, signalFd)`; the child calls
-`Reader::run(pipeReadFd, dataFilePath)` directly.
+`Reader::run(pipeReadFd, readerConfig)` directly.
 Both processes run the same executable, without launching a separate Reader
 executable through `exec()`.
 
+- `Config` provides `AppConfig` defaults, CLI parsing, validation, and usage text.
+  Help and argument errors exit before any pipe, child process, or listener is created.
 - `main()` owns the pipe descriptors, closes unused ends, and waits for the child
   with `waitpid()` when the server returns. It ignores `SIGPIPE` so a closed reader
   is reported as a write error. It blocks `SIGINT` and `SIGTERM` before forking and
@@ -67,7 +72,13 @@ fragments. Ordering between the two processes can still vary.
 
 ```text
 CMakeLists.txt                 Project settings, executable, and tests
-src/main.cpp                  CLI parsing, pipe creation, and process management
+src/main.cpp                  Configuration wiring, pipe creation, and process management
+Config/
+    CMakeLists.txt            Config static library
+    include/AppConfig.hpp    Runtime settings and defaults
+    include/ConfigParser.hpp CLI parsing status and usage API
+    src/ConfigParser.cpp     Argument parsing, validation, and usage text
+    test/ConfigParserTest.cpp  Catch2 CLI configuration tests
 Server/
     CMakeLists.txt            Server static library
     include/Server.hpp        Server interface and client state
@@ -118,8 +129,7 @@ working directory. To select a different file:
 
 The parent directory must already exist. The reader needs permission to read and
 search the directory, create and rename files there, and append to the active
-file. The CLI accepts either no arguments or `--data-file PATH`; rotation and
-sync settings use the defaults described below.
+file.
 
 The equivalent CMake commands are:
 
@@ -136,11 +146,61 @@ cmake -S . -B build-sanitized -G Ninja -DCMAKE_BUILD_TYPE=Debug \
 cmake --build build-sanitized
 ```
 
+## Command-line options
+
+Run `./build/telemetry-server --help` (or `-h`) to print usage and exit successfully.
+With no arguments, the server uses these defaults:
+
+| Option | Default | Requirements |
+| --- | --- | --- |
+| `--port PORT` | `9000` | Integer from 1 through 65535 |
+| `--data-file PATH` | `telemetry.bin` | Nonempty path; parent directory must already exist |
+| `--segment-bytes BYTES` | `67108864` (64 MiB) | At least 32 bytes and a multiple of 32 |
+| `--sync-bytes BYTES` | `1048576` (1 MiB) | Zero to disable byte-based syncing, or at most the segment size |
+
+Supply each value as a separate argument, such as `--port 9100`.
+The `--port=9100` form and positional arguments are not supported. Numeric
+values must be unsigned decimal integers without signs, whitespace, fractions,
+or unit suffixes; values that overflow their destination type are rejected.
+Byte counts use `std::size_t`.
+
+For example, use port 9100, 8 MiB segments, and a 256 KiB sync interval:
+
+```bash
+./build/telemetry-server \
+    --port 9100 \
+    --data-file /tmp/telemetry.bin \
+    --segment-bytes 8388608 \
+    --sync-bytes 262144
+```
+
+The sync interval need not be a multiple of 32. Storage settings are validated
+together after parsing, so either option may appear first. When setting a segment
+size below the default 1 MiB sync interval, also lower `--sync-bytes` or set it to
+zero. For example, `--segment-bytes 32 --sync-bytes 0` is valid, while
+`--segment-bytes 32` alone is not. Disabling byte-based syncing still leaves
+syncing on rotation and clean shutdown enabled.
+
+Invalid arguments print a diagnostic and usage to stderr, then exit with failure
+before starting the server or reader. Examples of rejected arguments:
+
+| Arguments | Reason |
+| --- | --- |
+| `--port 0`, `--port 70000` | Port outside the allowed range |
+| `--port abc` | Non-numeric port |
+| `--segment-bytes 31` | Segment smaller than one 32-byte frame |
+| `--segment-bytes 33` | Segment not aligned to 32 bytes |
+| `--segment-bytes 32 --sync-bytes 64` | Sync interval exceeds segment size |
+| `--unknown` | Unknown option |
+| `--port` | Missing value; all four value-taking options require one |
+| `--data-file ""` | Empty data file path |
+
 ## Send telemetry
 
 With the server running, use another **Bash** terminal on the same host or inside
 the same container. These examples use Bash's `/dev/tcp` support. Every frame is
-32 bytes, without a newline or separator.
+32 bytes, without a newline or separator. They assume the default port 9000;
+replace it with the selected port if you started the server with `--port`.
 
 ### One complete frame
 
@@ -285,7 +345,8 @@ files are created with mode `0640`, subject to the process umask.
 ### Configuration and rotation
 
 `FileStore` accepts an optional `FileStoreConfig` in its constructor. The reader
-uses the defaults; these settings are not exposed as CLI options.
+sets it from the CLI configuration: `--segment-bytes` controls `maxSegmentBytes`,
+and `--sync-bytes` controls `syncEveryBytes`.
 
 | Setting | Default | Requirements |
 | --- | --- | --- |
@@ -357,6 +418,12 @@ ctest --test-dir build --output-on-failure
 
 Catch2 unit tests cover:
 
+- CLI configuration: defaults, runtime options, invalid ports, malformed numbers
+  and overflow, undersized or unaligned segments, sync intervals larger than the
+  segment (including the default interval), unknown options and positional
+  arguments, missing values for every option, and empty data paths. Tests check
+  error status and diagnostics, plus valid port and storage boundaries, both
+  storage-option orders, disabled syncing, and both help flags.
 - The binary codec: known wire bytes, integer boundaries, exact floating-point
   bits, truncated and oversized input, invalid headers, unaligned input, and
   error descriptions.
@@ -371,7 +438,13 @@ Catch2 unit tests cover:
 These unit tests do not bind port 9000. Run all Catch2 tests with:
 
 ```bash
-ctest --test-dir build -R '^(TelemetryCodecTest|FileStoreTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+ctest --test-dir build -R '^(ConfigParserTest|TelemetryCodecTest|FileStoreTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+```
+
+Run just the CLI configuration tests after building:
+
+```bash
+ctest --test-dir build -R '^ConfigParserTest\.' --output-on-failure
 ```
 
 `Protocol` and its codec tests are already included by the root CMake setup.
@@ -391,7 +464,8 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 28 tests: 26 Catch2 cases and two process integration tests.
+The suite currently has 39 tests: 37 Catch2 cases (including 11 configuration
+cases) and two process integration tests.
 The Bash smoke test sends a fragmented binary frame followed by another frame,
 checks decoded reader output, then terminates the reader to verify that the parent
 reports failure. The graceful-shutdown test sends a valid frame, waits for its

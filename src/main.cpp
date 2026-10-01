@@ -1,3 +1,5 @@
+#include "AppConfig.hpp"
+#include "ConfigParser.hpp"
 #include "Reader.hpp"
 #include "Server.hpp"
 
@@ -37,19 +39,22 @@ bool blockShutdownSignals(sigset_t &mask)
 
 int main(int argc, char* argv[])
 {
-    std::string_view dataFilePath = "telemetry.bin";
+    using namespace telemetry::config;
 
-    if (argc == 3) {
-        if (std::string_view{argv[1]} != "--data-file") {
+    AppConfig config;
 
-            std::cerr << "usage: " << argv[0] << " [--data-file PATH]\n";
+    const ParseStatus parseStatus = parseArguments(argc, argv, config, std::cerr);
 
-            return EXIT_FAILURE;
-        }
+    if (parseStatus == ParseStatus::HelpRequested) {
 
-        dataFilePath = argv[2];
-    } else if (argc != 1) {
-        std::cerr << "usage: " << argv[0] << " [--data-file PATH]\n";
+        printUsage(std::cout, argv[0]);
+
+        return EXIT_SUCCESS;
+    }
+
+    if (parseStatus == ParseStatus::Error) {
+
+        printUsage(std::cerr, argv[0]);
 
         return EXIT_FAILURE;
     }
@@ -74,6 +79,14 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
+    const ReaderConfig readerConfig{.dataFilePath = config.dataFilePath,
+
+                                    .maxSegmentBytes = config.maxSegmentBytes,
+
+                                    .syncEveryBytes = config.syncEveryBytes};
+
+    const ServerConfig serverConfig{.port = config.port};
+
     int pipeFds[2]{};
     if (pipe2(pipeFds, O_CLOEXEC) == -1) {
         perror("pipe2");
@@ -90,7 +103,7 @@ int main(int argc, char* argv[])
 
     if (readerPid == 0) {
         close(pipeFds[1]);
-        const int result = Reader{}.run(pipeFds[0], dataFilePath);
+        const int result = Reader{}.run(pipeFds[0], readerConfig);
         close(pipeFds[0]);
         std::cout.flush();
         std::cerr.flush();
@@ -117,7 +130,7 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    const int serverResult = Server{}.run(pipeFds[1], signalFd);
+    const int serverResult = Server{serverConfig}.run(pipeFds[1], signalFd);
     close(signalFd);
     close(pipeFds[1]); // Let the reader drain the pipe and receive EOF.
 

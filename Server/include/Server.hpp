@@ -11,10 +11,14 @@
 struct epoll_event;
 struct IpcQueue;
 
+struct ServerConfig {
+    std::uint16_t port = 9000;
+};
+
 class Server
 {
   public:
-    Server() = default;
+    explicit Server(ServerConfig config = {});
     ~Server();
 
     Server(const Server &) = delete;
@@ -34,6 +38,7 @@ class Server
         Buffer inputBuffer;
     };
 
+    ServerConfig m_config;
     std::unordered_map<int, ClientState> m_clients;
 
     // Socket setup

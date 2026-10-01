@@ -25,12 +25,13 @@
 namespace
 {
 
-constexpr std::uint16_t kPort = 9000;
 constexpr int kMaxEvents = 64;
 constexpr std::size_t kReadBufferSize = 4096;
 constexpr std::size_t kMaxClientBuffer = 64 * 1024;
 
 } // namespace
+
+Server::Server(ServerConfig config) : m_config(config), m_clients() {}
 
 Server::~Server()
 {
@@ -104,7 +105,7 @@ int Server::run(int pipeWriteFd, int signalFd)
     std::vector<epoll_event> events(kMaxEvents);
 
     std::cout << "[server] pid=" << getpid() << '\n'
-              << "[server] listening on 0.0.0.0:" << kPort << '\n';
+              << "[server] listening on 0.0.0.0:" << m_config.port << '\n';
 
     State state = State::Running;
     int result = EXIT_FAILURE;
@@ -185,7 +186,7 @@ bool Server::bindSocket(int fd) const
 {
     sockaddr_in address{};
     address.sin_family = AF_INET;
-    address.sin_port = htons(kPort);
+    address.sin_port = htons(m_config.port);
     address.sin_addr.s_addr = htonl(INADDR_ANY);
 
     return bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != -1;

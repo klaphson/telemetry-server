@@ -13,12 +13,15 @@
 #include <span>
 #include <vector>
 
-int Reader::run(int pipeReadFd, std::string_view dataFilePath) const
+int Reader::run(int pipeReadFd, const ReaderConfig &config) const
 {
     std::cout << "[reader] pid=" << getpid() << '\n';
 
-    FileStore store;
-    if (!store.openFile(dataFilePath)) {
+    FileStore store{FileStoreConfig{.maxSegmentBytes = config.maxSegmentBytes,
+
+                                    .syncEveryBytes = config.syncEveryBytes}};
+
+    if (!store.openFile(config.dataFilePath)) {
         return EXIT_FAILURE;
     }
 
