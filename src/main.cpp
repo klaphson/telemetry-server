@@ -18,7 +18,7 @@
 namespace
 {
 
-bool blockShutdownSignals(sigset_t &mask)
+bool blockManagedSignals(sigset_t &mask)
 {
     if (sigemptyset(&mask) == -1) {
         return false;
@@ -29,6 +29,10 @@ bool blockShutdownSignals(sigset_t &mask)
     }
 
     if (sigaddset(&mask, SIGTERM) == -1) {
+        return false;
+    }
+
+    if (sigaddset(&mask, SIGCHLD) == -1) {
         return false;
     }
 
@@ -65,9 +69,9 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    sigset_t shutdownMask{};
+    sigset_t signalMask{};
 
-    if (!blockShutdownSignals(shutdownMask)) {
+    if (!blockManagedSignals(signalMask)) {
         perror("sigprocmask");
         return EXIT_FAILURE;
     }
@@ -112,7 +116,7 @@ int main(int argc, char* argv[])
 
     close(pipeFds[0]);
 
-    const int signalFd = signalfd(-1, &shutdownMask, SFD_NONBLOCK | SFD_CLOEXEC);
+    const int signalFd = signalfd(-1, &signalMask, SFD_NONBLOCK | SFD_CLOEXEC);
 
     if (signalFd == -1) {
         perror("signalfd");
@@ -130,7 +134,7 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    const int serverResult = Server{serverConfig}.run(pipeFds[1], signalFd);
+    const int serverResult = Server{serverConfig}.run(pipeFds[1], signalFd, readerPid);
     close(signalFd);
     close(pipeFds[1]); // Let the reader drain the pipe and receive EOF.
 
@@ -142,8 +146,23 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS) {
-        std::cerr << "[main] reader failed\n";
+    if (WIFSIGNALED(status)) {
+        std::cerr << "[main] reader terminated by signal=" << WTERMSIG(status) << '\n';
+
+        return EXIT_FAILURE;
+    }
+
+    if (!WIFEXITED(status)) {
+        std::cerr << "[main] reader terminated unexpectedly\n";
+
+        return EXIT_FAILURE;
+    }
+
+    const int readerExitCode = WEXITSTATUS(status);
+
+    if (readerExitCode != EXIT_SUCCESS) {
+        std::cerr << "[main] reader exited code=" << readerExitCode << '\n';
+
         return EXIT_FAILURE;
     }
     return serverResult;

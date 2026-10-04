@@ -8,6 +8,8 @@
 #include <string>
 #include <unordered_map>
 
+#include <sys/types.h>
+
 struct epoll_event;
 struct IpcQueue;
 
@@ -27,7 +29,7 @@ class Server
     Server &operator=(Server &&) = delete;
 
     // Borrows the descriptor; the caller closes it after run() returns.
-    int run(int pipeWriteFd, int signalFd);
+    int run(int pipeWriteFd, int signalFd, pid_t readerPid);
 
   private:
     friend struct ServerTestAccess;
@@ -36,6 +38,11 @@ class Server
 
     struct ClientState {
         Buffer inputBuffer;
+    };
+
+    struct SignalState {
+        bool shutdownRequested = false;
+        bool readerTerminated = false;
     };
 
     ServerConfig m_config;
@@ -68,8 +75,9 @@ class Server
     bool flushIpcQueue(int pipe_fd, IpcQueue &queue) const;
     bool updatePipeInterest(int epoll_fd, int pipe_fd, bool want_epollout) const;
 
-    bool handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state);
-    bool handleSignalFd(int signalFd, bool &shutdownRequested) const;
+    bool handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
+                           pid_t readerPid);
+    bool handleSignalFd(int signalFd, pid_t readerPid, SignalState &signalState) const;
     void beginDraining(int epollFd, int &listenFd);
 
     bool updateIngressInterest(int epollFd, int listenFd, bool enabled) const;

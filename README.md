@@ -22,7 +22,7 @@ TCP clients → Server (parent process) → pipe → Reader (child process)
 the pipe and calls `fork()`. It passes the selected port to the `Server`
 constructor through `ServerConfig` and the file and storage settings to the
 reader through `ReaderConfig`. The parent calls
-`Server::run(pipeWriteFd, signalFd)`; the child calls
+`Server::run(pipeWriteFd, signalFd, readerPid)`; the child calls
 `Reader::run(pipeReadFd, readerConfig)` directly.
 Both processes run the same executable, without launching a separate Reader
 executable through `exec()`.
@@ -31,8 +31,8 @@ executable through `exec()`.
   Help and argument errors exit before any pipe, child process, or listener is created.
 - `main()` owns the pipe descriptors, closes unused ends, and waits for the child
   with `waitpid()` when the server returns. It ignores `SIGPIPE` so a closed reader
-  is reported as a write error. It blocks `SIGINT` and `SIGTERM` before forking and
-  gives the parent a `signalfd` for shutdown notifications.
+  is reported as a write error. It blocks `SIGINT`, `SIGTERM`, and `SIGCHLD` before
+  forking and gives the parent a `signalfd` for shutdown and child-state notifications.
 - `Server` uses nonblocking sockets and `epoll` to accept connections, read
   binary frames, and write queued data to the pipe. `handleEvent()` dispatches one
   event; `run()` owns the wait loop and cleanup.
@@ -63,6 +63,15 @@ pipe write end so the reader can finish and receive EOF. The reader syncs its
 data file before logging EOF and returning success. Input that has not been
 queued is not part of this drain.
 
+The server monitors `SIGCHLD` for the reader's PID. A reader exit, signal kill,
+or core dump observed while running or draining stops the server with failure,
+even if the reader exited with code zero. This detects reader loss while idle,
+without waiting for another client write. Reader stop and continue events are
+logged without initiating shutdown; notifications for other child PIDs are ignored.
+If one signal batch contains both reader termination and a shutdown request,
+reader failure takes precedence. `main()` still reaps the reader with `waitpid()`
+and reports a nonzero exit code or terminating signal.
+
 `main()` configures stdout for line buffering before `fork()`, including when
 output is redirected to a file. Log lines are flushed at newlines instead of after
 each `<<` insertion, preventing the observed mixing of server and reader log
@@ -85,7 +94,7 @@ Server/
     include/Buffer.hpp        Shared byte storage, offset tracking, and compaction
     include/IpcQueue.hpp      Outgoing pipe queue
     src/Server.cpp            TCP and epoll handling
-    test/                     Catch2 queue and backpressure unit tests
+    test/                     Catch2 queue, backpressure, and signal unit tests
 Reader/
     CMakeLists.txt            Reader static library
     include/Reader.hpp        Reader interface
@@ -102,7 +111,7 @@ Storage/
     src/FileStore.cpp        File writes, rotation, syncing, and partial-tail recovery
     test/FileStoreTest.cpp   Catch2 storage unit tests
 tests/process_smoke.sh        Binary TCP/pipe flow and reader-failure integration test
-tests/graceful_shutdown.sh    SIGTERM drain, reader EOF, and persisted-size test
+tests/graceful_shutdown.sh    SIGTERM drain, persistence, reader signals, and failure tests
 ```
 
 ## Build and run on Linux
@@ -400,7 +409,9 @@ an explicit sync; library callers should call `sync()` before successful shutdow
 A printed record may still be awaiting the next sync and therefore does not
 guarantee durability after a system crash or power loss. Opening, appending,
 recovery, rotation, or sync failures make the reader exit with failure; the parent
-reports a failed reader when it exits.
+reports `[main] reader exited code=1`. If the reader is killed by a signal, the
+parent instead reports `[main] reader terminated by signal=N`, where `N` is the
+signal number.
 
 ## Tests
 
@@ -434,11 +445,15 @@ Catch2 unit tests cover:
 - Server backpressure: pause/resume, exact binary frame preservation, partial
   frames across a pause, stopping before the next receive, shutdown, and error
   propagation, using nonblocking pipes and socket pairs.
+- Server signals: empty input, repeated shutdown requests, reader termination
+  while running or draining, nonterminal reader events, unrelated signals and
+  child PIDs, batched notifications, and reader-failure precedence over shutdown.
+  Tests inject `signalfd_siginfo` records through a nonblocking pipe.
 
 These unit tests do not bind port 9000. Run all Catch2 tests with:
 
 ```bash
-ctest --test-dir build -R '^(ConfigParserTest|TelemetryCodecTest|FileStoreTest|IpcQueueTest|ServerBackpressureTest)\.' --output-on-failure
+ctest --test-dir build -R '^(ConfigParserTest|TelemetryCodecTest|FileStoreTest|IpcQueueTest|ServerBackpressureTest|ServerSignalTest)\.' --output-on-failure
 ```
 
 Run just the CLI configuration tests after building:
@@ -460,19 +475,29 @@ Run just the storage tests after building:
 ctest --test-dir build -R '^FileStoreTest\.' --output-on-failure
 ```
 
+Run just the signal tests after building:
+
+```bash
+ctest --test-dir build -R '^ServerSignalTest\.' --output-on-failure
+```
+
 CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 39 tests: 37 Catch2 cases (including 11 configuration
-cases) and two process integration tests.
+The suite currently has 46 tests: 44 Catch2 cases (including 11 configuration
+cases and seven signal cases) and two process integration tests.
 The Bash smoke test sends a fragmented binary frame followed by another frame,
 checks decoded reader output, then terminates the reader to verify that the parent
-reports failure. The graceful-shutdown test sends a valid frame, waits for its
-output, sends `SIGTERM`, and checks the drain messages, reader EOF, and successful
-process exit. It uses a temporary data path and, after successfully waiting for
-the server to exit, checks that the file exists and contains exactly 32 bytes.
-Cleanup removes that temporary file. The smoke test uses the default data path,
+reports failure and the terminating signal. The graceful-shutdown test first
+stops and continues the reader to verify nonterminal child notifications. It then
+sends a valid frame, waits for its output, sends `SIGTERM`, and checks the drain
+messages, reader EOF, and successful process exit. It uses a temporary data path
+and checks that the file contains exactly 32 bytes after shutdown. Additional runs
+verify that killing an idle reader fails without further traffic and that a
+storage-open failure reports the reader's exit code. Process-exit waits are bounded
+even when the script runs outside CTest. Cleanup removes the temporary file.
+The smoke test uses the default data path,
 so it creates or appends to `telemetry.bin` in its working directory (`build`
 when run through the CTest command above).
 

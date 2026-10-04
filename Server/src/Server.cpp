@@ -40,7 +40,7 @@ Server::~Server()
     }
 }
 
-int Server::run(int pipeWriteFd, int signalFd)
+int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
 {
     if (!setNonBlocking(pipeWriteFd)) {
         perror("fcntl pipe O_NONBLOCK");
@@ -134,7 +134,7 @@ int Server::run(int pipeWriteFd, int signalFd)
             const auto &event = events[static_cast<std::size_t>(i)];
 
             if (event.data.fd == signalFd) {
-                if (!handleSignalEvent(event, epoll_fd, listen_fd, state)) {
+                if (!handleSignalEvent(event, epoll_fd, listen_fd, state, readerPid)) {
                     result = EXIT_FAILURE;
                     running = false;
                     break;
@@ -517,16 +517,23 @@ bool Server::updatePipeInterest(int epoll_fd, int pipe_fd, bool want_epollout) c
     return modifyEpollFd(epoll_fd, pipe_fd, events);
 }
 
-bool Server::handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state)
+bool Server::handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
+                               pid_t readerPid)
 {
     if ((event.events & EPOLLIN) != 0U) {
-        bool shutdownRequested = false;
+        SignalState signalState{};
 
-        if (!handleSignalFd(event.data.fd, shutdownRequested)) {
+        if (!handleSignalFd(event.data.fd, readerPid, signalState)) {
             return false;
         }
 
-        if (shutdownRequested && state == State::Running) {
+        if (signalState.readerTerminated) {
+            std::cerr << "[server] storage process unavailable\n";
+
+            return false;
+        }
+
+        if (signalState.shutdownRequested && state == State::Running) {
             std::cout << "[server] entering draining state\n";
 
             state = State::Draining;
@@ -542,7 +549,7 @@ bool Server::handleSignalEvent(const epoll_event &event, int epollFd, int &liste
     return true;
 }
 
-bool Server::handleSignalFd(int signalFd, bool &shutdownRequested) const
+bool Server::handleSignalFd(int signalFd, pid_t readerPid, SignalState &signalState) const
 {
     while (true) {
         signalfd_siginfo info{};
@@ -556,7 +563,55 @@ bool Server::handleSignalFd(int signalFd, bool &shutdownRequested) const
 
                 std::cout << "[server] shutdown requested signal=" << info.ssi_signo << '\n';
 
-                shutdownRequested = true;
+                signalState.shutdownRequested = true;
+
+                continue;
+            }
+
+            if (info.ssi_signo == static_cast<std::uint32_t>(SIGCHLD)) {
+
+                if (info.ssi_pid != static_cast<std::uint32_t>(readerPid)) {
+
+                    continue;
+                }
+
+                switch (info.ssi_code) {
+                case CLD_EXITED:
+                    std::cerr << "[server] reader exited code=" << info.ssi_status << '\n';
+
+                    signalState.readerTerminated = true;
+
+                    break;
+
+                case CLD_KILLED:
+                    std::cerr << "[server] reader killed by signal=" << info.ssi_status << '\n';
+
+                    signalState.readerTerminated = true;
+
+                    break;
+
+                case CLD_DUMPED:
+                    std::cerr << "[server] reader dumped core signal=" << info.ssi_status << '\n';
+
+                    signalState.readerTerminated = true;
+
+                    break;
+
+                case CLD_STOPPED:
+                    std::cout << "[server] reader stopped signal=" << info.ssi_status << '\n';
+
+                    break;
+
+                case CLD_CONTINUED:
+                    std::cout << "[server] reader continued\n";
+
+                    break;
+
+                default:
+                    break;
+                }
+
+                continue;
             }
 
             continue;

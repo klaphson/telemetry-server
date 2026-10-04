@@ -64,4 +64,4 @@ if wait "$server_pid"; then
     exit 1
 fi
 server_pid=
-grep -qF '[main] reader failed' "$log"
+grep -qF "[main] reader terminated by signal=$(kill -l KILL)" "$log"

@@ -8,3 +8,9 @@ target_link_libraries(ServerBackpressureTest PRIVATE
     Server Protocol Catch2::Catch2WithMain telemetry_build_options)
 catch_discover_tests(ServerBackpressureTest
     TEST_PREFIX "ServerBackpressureTest." PROPERTIES TIMEOUT 10)
+
+add_executable(ServerSignalTest ServerSignalTest.cpp)
+target_link_libraries(ServerSignalTest PRIVATE
+    Server Catch2::Catch2WithMain telemetry_build_options)
+catch_discover_tests(ServerSignalTest
+    TEST_PREFIX "ServerSignalTest." PROPERTIES TIMEOUT 10)
