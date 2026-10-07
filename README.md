@@ -112,6 +112,7 @@ Storage/
     test/FileStoreTest.cpp   Catch2 storage unit tests
 tests/process_smoke.sh        Binary TCP/pipe flow and reader-failure integration test
 tests/graceful_shutdown.sh    SIGTERM drain, persistence, reader signals, and failure tests
+packaging/systemd/telemetry-server.service  systemd service unit for a Linux host
 ```
 
 ## Build and run on Linux
@@ -139,6 +140,22 @@ working directory. To select a different file:
 The parent directory must already exist. The reader needs permission to read and
 search the directory, create and rename files there, and append to the active
 file.
+
+`make run-service` builds the debug executable and starts it in the foreground
+as the `telemetry` user through `runuser`, with data stored at
+`/var/lib/telemetry-server/telemetry.bin`. It requires root privileges, an existing
+`telemetry` account, and a writable data directory. On a native Linux host, create
+the account using the command in [Run as a systemd service](#run-as-a-systemd-service)
+if needed, then run:
+
+```bash
+sudo install -d -o telemetry -g telemetry -m 0750 /var/lib/telemetry-server
+sudo make run-service
+```
+
+The `telemetry` user must also be able to access the checkout and execute the
+built binary. This Make target starts a foreground process; use the systemd unit
+below to manage the installed application as a service.
 
 The equivalent CMake commands are:
 
@@ -526,8 +543,28 @@ Inside the container, the repository is mounted at `/workspace`:
 make run
 ```
 
+<<<<<<< Updated upstream
 Open another terminal in the same container to send telemetry or inspect the
 processes:
+=======
+The image also creates the `telemetry` user and group and prepares
+`/var/lib/telemetry-server` with mode `0750`, owned by that account. To run as this
+user with persistent storage, use the following instead of `make run` inside the
+container's root shell:
+
+```bash
+make run-service
+```
+
+Compose mounts the `telemetry-data` named volume at `/var/lib/telemetry-server`,
+so the active data file and archived segments written by `make run-service`
+persist across container recreation. `make run` uses `telemetry.bin` in the
+mounted checkout by default. Both commands run in the foreground; stop the
+server with Ctrl+C before switching between them.
+
+From another host terminal, enter the same container to send telemetry or inspect
+the processes:
+>>>>>>> Stashed changes
 
 ```bash
 docker compose exec dev bash
@@ -540,6 +577,64 @@ the application in a temporary container.
 
 The `.devcontainer` configuration also supports opening the project in the
 provided development container.
+
+## Run as a systemd service
+
+The unit in `packaging/systemd/telemetry-server.service` runs the server as the
+`telemetry` user and group, with the executable at
+`/usr/local/bin/telemetry-server`. Use these commands on a Linux host running
+systemd, from the repository root. Stop any other server using port 9000 first.
+
+Build a release executable without the test dependencies:
+
+```bash
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF
+cmake --build build-release
+```
+
+Create the service account once (skip this step if it already exists):
+
+```bash
+sudo useradd --system --user-group --no-create-home \
+    --home-dir /var/lib/telemetry-server --shell /usr/sbin/nologin telemetry
+```
+
+Install the executable and unit, then enable the service at boot and start it:
+
+```bash
+sudo install -m 0755 build-release/telemetry-server /usr/local/bin/telemetry-server
+sudo install -m 0644 packaging/systemd/telemetry-server.service \
+    /etc/systemd/system/telemetry-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now telemetry-server.service
+```
+
+The unit uses port 9000, 64 MiB segments, and a 1 MiB sync interval. systemd
+creates `/var/lib/telemetry-server` with mode `0750`, owned by the service
+account. The reader writes `telemetry.bin` and its archived segments there.
+The unit applies a `0027` umask and restricts filesystem writes using
+`ProtectSystem=strict`; its state directory remains writable. If you change the
+data path, also adjust the unit's writable-directory settings and permissions.
+
+Inspect service status and follow the server and reader logs:
+
+```bash
+sudo systemctl status telemetry-server.service
+sudo journalctl -u telemetry-server.service -f
+```
+
+The unit restarts the application after failures with a two-second delay.
+To stop it, allowing up to 30 seconds for shutdown:
+
+```bash
+sudo systemctl stop telemetry-server.service
+```
+
+After editing the installed unit, run `sudo systemctl daemon-reload` followed by
+`sudo systemctl restart telemetry-server.service`. To update the executable,
+stop the service, repeat the executable installation command, and start it with
+`sudo systemctl start telemetry-server.service`.
 
 ## Formatting and Git hooks
 

@@ -1,0 +1,37 @@
+[Unit]
+Description=Telemetry Server
+After=network.target
+
+[Service]
+Type=exec
+
+User=telemetry
+Group=telemetry
+
+ExecStart=/usr/local/bin/telemetry-server \
+    --port 9000 \
+    --data-file /var/lib/telemetry-server/telemetry.bin \
+    --segment-bytes 67108864 \
+    --sync-bytes 1048576
+
+Restart=on-failure
+RestartSec=2s
+
+StateDirectory=telemetry-server
+StateDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

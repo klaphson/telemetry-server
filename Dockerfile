@@ -23,6 +23,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+RUN groupadd --system telemetry \
+    && useradd \
+        --system \
+        --gid telemetry \
+        --home-dir /var/lib/telemetry-server \
+        --shell /usr/sbin/nologin \
+        telemetry \
+    && mkdir -p /var/lib/telemetry-server \
+    && chown telemetry:telemetry /var/lib/telemetry-server \
+    && chmod 0750 /var/lib/telemetry-server
+
 RUN git config --global core.editor nano
 
 WORKDIR /workspace
