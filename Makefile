@@ -1,4 +1,4 @@
-.PHONY: configure build run test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -14,6 +14,11 @@ build: configure
 
 run: build
 	./build/telemetry-server
+
+run-service: build
+	runuser -u telemetry -- \
+		./build/telemetry-server \
+		--data-file /var/lib/telemetry-server/telemetry.bin
 
 test: build
 	ctest --test-dir build --output-on-failure

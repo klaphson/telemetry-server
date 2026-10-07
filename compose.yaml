@@ -8,6 +8,7 @@ services:
     volumes:
       - .:/workspace
       - shell-history:/root/.history
+      - telemetry-data:/var/lib/telemetry-server
       - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
     environment:
       SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
@@ -22,3 +23,4 @@ services:
 
 volumes:
   shell-history:
+  telemetry-data:
