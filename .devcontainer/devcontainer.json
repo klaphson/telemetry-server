@@ -12,5 +12,8 @@
     }
   },
   "shutdownAction": "stopCompose",
-  "postCreateCommand": "pre-commit install"
+  "postCreateCommand": ["bash", ".devcontainer/setup.sh"],
+  "postStartCommand": ["bash", ".devcontainer/setup.sh"],
+  "postAttachCommand": ["bash", ".devcontainer/setup.sh"],
+  "waitFor": "postStartCommand"
 }

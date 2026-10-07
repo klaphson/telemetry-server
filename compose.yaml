@@ -8,7 +8,14 @@ services:
     volumes:
       - .:/workspace
       - shell-history:/root/.history
+      - ./.devcontainer/.local/vscode-server:/root/.vscode-server
+      - ./.devcontainer/.local/codex:/root/.codex
       - telemetry-data:/var/lib/telemetry-server
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        bind:
+          create_host_path: false
       - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
     environment:
       SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
