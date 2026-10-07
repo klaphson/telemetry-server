@@ -1,4 +1,7 @@
-# Czytelny prompt w kontenerze: zielony użytkownik/host, niebieski katalog.
+# Use nano for Git messages and other terminal editing.
+export EDITOR=nano VISUAL=nano GIT_EDITOR=nano
+
+# Readable container prompt: green user/host, blue directory.
 case "$TERM" in
     xterm*|*-256color|screen-256color) color_prompt=yes ;;
 esac
@@ -10,7 +13,7 @@ else
 fi
 unset color_prompt
 
-# Udostępnia historię wszystkim powłokom uruchomionym w tym workspace.
+# Shares command history across all shells running in this workspace.
 HISTFILE=/root/.history/bash_history
 HISTCONTROL=ignoredups:erasedups
 HISTSIZE=10000
@@ -31,7 +34,14 @@ alias egrep='egrep --color=auto'
 alias fgrep='fgrep --color=auto'
 alias psf='ps -ef --forest'
 
-# Autouzupełnianie poleceń i argumentów, w tym Gita.
-if [[ $- == *i* ]] && [[ -r /usr/share/bash-completion/bash_completion ]]; then
-    source /usr/share/bash-completion/bash_completion
+# Command and argument completion, including Git.
+if [[ $- == *i* ]] && ! shopt -oq posix; then
+    if [[ -r /usr/share/bash-completion/bash_completion ]]; then
+        source /usr/share/bash-completion/bash_completion
+    elif [[ -r /etc/bash_completion ]]; then
+        source /etc/bash_completion
+    fi
+    if [[ -r /usr/share/bash-completion/completions/git ]]; then
+        source /usr/share/bash-completion/completions/git
+    fi
 fi

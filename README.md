@@ -543,10 +543,6 @@ Inside the container, the repository is mounted at `/workspace`:
 make run
 ```
 
-<<<<<<< Updated upstream
-Open another terminal in the same container to send telemetry or inspect the
-processes:
-=======
 The image also creates the `telemetry` user and group and prepares
 `/var/lib/telemetry-server` with mode `0750`, owned by that account. To run as this
 user with persistent storage, use the following instead of `make run` inside the
@@ -565,6 +561,10 @@ server with Ctrl+C before switching between them.
 From another host terminal, enter the same container to send telemetry or inspect
 the processes:
 >>>>>>> Stashed changes
+=======
+From another host terminal, enter the same container to send telemetry or inspect
+the processes:
+>>>>>>> 747d9e1 (chore(devcontainer): persist settings and automate setup with host Docker access)
 
 ```bash
 docker compose exec dev bash
@@ -577,6 +577,46 @@ the application in a temporary container.
 
 The `.devcontainer` configuration also supports opening the project in the
 provided development container.
+
+The image includes the Docker CLI, Compose, and Buildx. Compose mounts the
+host's `/var/run/docker.sock` into the development container, so Docker commands
+inside it operate on the host's Docker engine and existing containers:
+
+```bash
+docker ps
+docker compose version
+docker buildx version
+```
+
+If an existing container reports `docker: command not found`, run
+`bash .devcontainer/setup.sh` inside it to install the missing Docker CLI,
+Compose, and Buildx. Check access to the host engine with `docker ps`.
+
+After changing the Dockerfile or socket mount, use **Dev Containers: Rebuild
+Container** in VS Code. Bind mount source paths passed to Docker are resolved
+on the host; `/workspace` is the path inside the development container. Run
+the project's `docker compose up` and `make docker-shell` commands from the host
+so that the relative repository mounts resolve correctly.
+
+VS Code extensions and server settings are stored in
+`.devcontainer/.local/vscode-server/`; Codex configuration, plugins, and skills
+are stored in `.devcontainer/.local/codex/`. Compose mounts these host directories
+at `/root/.vscode-server` and `/root/.codex`, so their contents survive container
+rebuilds. The local directories are excluded from Git and the Docker build
+context. Keep them to retain your installed extensions and plugins.
+
+When applying this configuration to an existing container for the first time,
+run the following inside that container before rebuilding. Skip this step if
+the directories are already mounted:
+
+```bash
+mkdir -p .devcontainer/.local/vscode-server .devcontainer/.local/codex
+cp -a /root/.vscode-server/. .devcontainer/.local/vscode-server/
+tar -C /root/.codex --exclude=./ipc --exclude=./.tmp -cf - . \
+    | tar -C .devcontainer/.local/codex -xf -
+```
+
+Then use **Dev Containers: Rebuild Container** in VS Code.
 
 ## Run as a systemd service
 
@@ -654,8 +694,20 @@ make hooks    # Install the Git pre-commit hook once per checkout
 make format   # Format all tracked C/C++ files
 ```
 
-Dev Containers install the hook automatically when created. Run Git commits in
-the environment where the tools and hook were installed.
+Dev Containers check for `pre-commit`, `clang-format-18`, `nano`, `bash-completion`,
+the Docker CLI, Compose, and Buildx
+and install any missing tools when created, on every container start, and whenever VS Code
+attaches. The setup also reinstalls the Git hook each time, so reopening VS Code
+or rebuilding the container keeps it ready. Packages are installed only when
+missing. The setup also configures nano as Git's editor, and the image and Bash
+configuration set `EDITOR`, `VISUAL`, and `GIT_EDITOR` to `nano`, so commit message
+editing works after container rebuilds. Run Git commits in the environment where
+the tools and hook were installed.
+The setup also refreshes `~/.bashrc` from `docker/bashrc`, which loads Bash and
+Git tab completion in interactive terminals. Keep shell customizations in
+`docker/bashrc` so they survive restarts and rebuilds. After setup repairs an
+existing container, open a new terminal or run `source ~/.bashrc` in the current
+one to load completion.
 The hook formats staged C/C++ files before each commit. If it changes files,
 review and stage those changes, then commit again. `make format` also exits with
 a nonzero status when it changes files; run it again to confirm formatting passes.
