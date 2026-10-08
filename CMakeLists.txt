@@ -37,6 +37,7 @@ endif()
 add_subdirectory(Protocol)
 add_subdirectory(Config)
 add_subdirectory(Storage)
+add_subdirectory(Ipc)
 add_subdirectory(Server)
 add_subdirectory(Reader)
 
