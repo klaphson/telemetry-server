@@ -71,8 +71,7 @@ class Server
     void removeAllClients(int epollFd);
 
     // Shared ring output
-    bool enqueueFrame(SharedRingBuffer &ring, int dataReadyFd,
-                      std::span<const std::byte> frame) const;
+    bool enqueueFrame(SharedRingBuffer &ring, std::span<const std::byte> frame) const;
 
     bool handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
                            pid_t readerPid);

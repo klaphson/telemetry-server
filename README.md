@@ -48,8 +48,8 @@ executable through `exec()`.
   shared mapping created before `fork()`. Exactly one producer pushes frames and
   one consumer pops them. The server pauses ingress at 3 MiB and checks the 1 MiB
   resume threshold on space-ready notifications. The server notifies the reader
-  after each push; the reader notifies the server after draining all currently
-  available frames.
+  once after every TCP recv() that publishes complete frames, rather than once
+  per frame. The reader notifies the server after draining all available frames.
 - `Reader` pops complete frames from the ring, decodes them, appends them to
   storage, and prints their fields. It blocks on the data-ready eventfd when idle.
   Invalid IPC frames, eventfd errors, or storage errors cause a failure exit.
@@ -492,7 +492,8 @@ Catch2 unit tests cover:
 - Server backpressure: pause/resume, exact binary frame preservation, partial
   frames across a pause, stopping before the next receive, shutdown, and error
   propagation, using a shared ring, eventfds, and nonblocking socket pairs.
-  Tests also check coalesced reader notifications and eventfd error handling.
+  Tests also check batched data-ready notifications, incomplete TCP frames,
+  valid frames before protocol errors, and eventfd error handling.
 - Server signals: empty input, repeated shutdown requests, reader termination
   while running or draining, nonterminal reader events, unrelated signals and
   child PIDs, batched notifications, and reader-failure precedence over shutdown.
@@ -532,7 +533,7 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 47 tests: 45 Catch2 cases (including 11 configuration
+The suite currently has 50 tests: 48 Catch2 cases (including 11 configuration
 cases and seven signal cases) and two process integration tests.
 Coverage gaps include merged child-state notifications, unexpected parent death,
 and unread-frame preservation during paused disconnects.

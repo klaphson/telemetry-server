@@ -104,7 +104,7 @@ struct ServerTestAccess {
 
     bool enqueue(std::span<const std::byte> frame)
     {
-        return server.enqueueFrame(ring, dataReady.fd, frame);
+        return server.enqueueFrame(ring, frame);
     }
 
     void drainState()
@@ -319,20 +319,68 @@ TEST_CASE_METHOD(ServerTestAccess, "a full ring is a fatal enqueue failure", "[b
     REQUIRE(readRing() == original);
 }
 
-TEST_CASE_METHOD(ServerTestAccess, "enqueued frames wake the reader and coalesce notifications",
+TEST_CASE_METHOD(ServerTestAccess, "one recv batch generates one reader notification",
                  "[backpressure]")
 {
     const auto first = frameBytes(3);
     const auto second = frameBytes(4);
-    REQUIRE(enqueue(std::as_bytes(std::span(first))));
-    REQUIRE(enqueue(std::as_bytes(std::span(second))));
+    send(client.fds[1], first + second);
+    REQUIRE(event(clientFd, EPOLLIN));
+
+    eventfd_t notifications{};
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == 0);
+    REQUIRE(notifications == 1);
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == -1);
+    REQUIRE(errno == EAGAIN);
+    REQUIRE(readRing() == first + second);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "two recv batches generate two notifications", "[backpressure]")
+{
+    std::string frames;
+    for (std::uint64_t timestamp = 0; timestamp < 256; ++timestamp) {
+        frames += frameBytes(timestamp);
+    }
+    REQUIRE(frames.size() == 2 * 4096);
+    send(client.fds[1], frames);
+    REQUIRE(event(clientFd, EPOLLIN));
 
     eventfd_t notifications{};
     REQUIRE(eventfd_read(dataReady.fd, &notifications) == 0);
     REQUIRE(notifications == 2);
+    REQUIRE(readRing() == frames);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "partial TCP frames do not notify early", "[backpressure]")
+{
+    const auto expected = frameBytes(7);
+    send(client.fds[1], expected.substr(0, 11));
+    REQUIRE(event(clientFd, EPOLLIN));
+
+    eventfd_t notifications{};
     REQUIRE(eventfd_read(dataReady.fd, &notifications) == -1);
     REQUIRE(errno == EAGAIN);
-    REQUIRE(readRing() == first + second);
+    REQUIRE(ring.empty());
+
+    send(client.fds[1], expected.substr(11));
+    REQUIRE(event(clientFd, EPOLLIN));
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == 0);
+    REQUIRE(notifications == 1);
+    REQUIRE(readRing() == expected);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "valid frames notify before a later protocol error",
+                 "[backpressure]")
+{
+    const auto valid = frameBytes(8);
+    send(client.fds[1], valid + std::string(frameSize, '\0'));
+    REQUIRE(event(clientFd, EPOLLIN));
+    REQUIRE_FALSE(hasClient());
+
+    eventfd_t notifications{};
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == 0);
+    REQUIRE(notifications == 1);
+    REQUIRE(readRing() == valid);
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "eventfd failures propagate from IPC handling", "[backpressure]")

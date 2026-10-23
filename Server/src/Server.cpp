@@ -341,6 +341,16 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
         if (bytesRead > 0) {
             const auto count = static_cast<std::size_t>(bytesRead);
 
+            // Publish once per recv() batch rather than once per frame.
+            bool publishedAny = false;
+            const auto notifyPublished = [&]() {
+                if (!publishedAny) {
+                    return true;
+                }
+                publishedAny = false;
+                return telemetry::ipc::notifyEvent(dataReadyFd);
+            };
+
             client.inputBuffer.data.insert(client.inputBuffer.data.end(), buffer.begin(),
                                            buffer.begin() + static_cast<std::ptrdiff_t>(count));
 
@@ -364,6 +374,12 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
                     std::cerr << "[server] client fd=" << clientFd
                               << " protocol error: " << toString(decoded.error) << '\n';
 
+                    // Even if this frame is invalid, earlier valid frames
+                    // from this recv() still need to wake the reader.
+                    if (!notifyPublished()) {
+                        return false;
+                    }
+
                     removeClient(epollFd, clientFd);
 
                     return true;
@@ -375,15 +391,22 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
                           << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
                           << " value=" << record.value << '\n';
 
-                if (!enqueueFrame(ring, dataReadyFd, frame)) {
+                if (!enqueueFrame(ring, frame)) {
+                    // The parent will notify the reader when shutting down.
                     return false;
                 }
 
+                publishedAny = true;
                 client.inputBuffer.offset += kFrameSize;
 
                 if (ring.pendingBytes() >= kPauseIngressBytes) {
                     pauseIngressRequested = true;
                 }
+            }
+
+            // Wake the reader after publishing all frames from this recv().
+            if (!notifyPublished()) {
+                return false;
             }
 
             client.inputBuffer.compact();
@@ -441,15 +464,10 @@ void Server::removeAllClients(int epollFd)
     }
 }
 
-bool Server::enqueueFrame(SharedRingBuffer &ring, int dataReadyFd,
-                          std::span<const std::byte> frame) const
+bool Server::enqueueFrame(SharedRingBuffer &ring, std::span<const std::byte> frame) const
 {
     if (!ring.tryPush(frame)) {
         std::cerr << "[server] shared ring full or unavailable\n";
-        return false;
-    }
-
-    if (!telemetry::ipc::notifyEvent(dataReadyFd)) {
         return false;
     }
 
