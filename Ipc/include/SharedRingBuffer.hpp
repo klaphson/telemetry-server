@@ -6,6 +6,11 @@
 #include <cstddef>
 #include <span>
 
+// Shared frame queue for exactly one producer and one consumer.
+// For use across processes, call create() before fork() and keep each inherited
+// mapping valid until that process has finished using it. The producer calls
+// tryPush() and closeProducer(); the consumer calls tryPop(). The caller manages
+// notifications, waiting, and process exit detection separately.
 class SharedRingBuffer
 {
   public:
@@ -47,6 +52,8 @@ class SharedRingBuffer
     [[nodiscard]]
     bool full() const noexcept;
 
+    // Call after the final push. Queued frames remain available to the consumer;
+    // the caller must notify any waiting consumer separately.
     void closeProducer() noexcept;
 
     [[nodiscard]]

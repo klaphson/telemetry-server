@@ -2,16 +2,12 @@
 #define READER_HPP
 
 #include <cstddef>
-#include <span>
 #include <string>
-#include <string_view>
-#include <vector>
 
-class FileStore;
+class SharedRingBuffer;
 
 struct ReaderConfig {
     std::string dataFilePath;
-
     std::size_t maxSegmentBytes;
     std::size_t syncEveryBytes;
 };
@@ -27,14 +23,10 @@ class Reader
     Reader(Reader &&) = delete;
     Reader &operator=(Reader &&) = delete;
 
-    // Borrows the descriptor; the caller closes it after run() returns.
-    int run(int pipeReadFd, const ReaderConfig &config) const;
-
-  private:
-    bool readFrames(std::span<const std::byte> bytes, std::vector<std::byte> &pending,
-                    std::size_t &offset, FileStore &store) const;
-
-    constexpr static std::size_t bufferSize = 4096;
+    // Borrows the ring and eventfds. The producer closes the ring and notifies
+    // dataReadyFd to let this call drain, sync, and return successfully.
+    int run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
+            const ReaderConfig &config) const;
 };
 
-#endif // READER_HPP
+#endif

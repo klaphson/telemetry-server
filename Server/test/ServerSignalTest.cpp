@@ -48,8 +48,7 @@ struct SignalPipe {
 
 } // namespace
 
-// Inject complete signalfd records through a nonblocking pipe to control event
-// ordering without delivering process-wide signals or forking children.
+// Control event ordering without delivering process-wide signals or forking children.
 // This fixture lives in its own executable, separate from the backpressure fixture.
 struct ServerTestAccess {
     static constexpr pid_t readerPid = 1234;

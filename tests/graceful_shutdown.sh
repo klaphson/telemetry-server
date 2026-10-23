@@ -55,7 +55,7 @@ start_server() {
     reader_pid=$(cat "/proc/$server_pid/task/$server_pid/children")
     reader_pid=${reader_pid// /}
     [[ "$reader_pid" =~ ^[0-9]+$ ]]
-    wait_for_log '[reader] reading binary telemetry from pipe'
+    wait_for_log '[reader] reading telemetry from shared memory'
 }
 
 # Bound waits even when this script is run outside CTest.

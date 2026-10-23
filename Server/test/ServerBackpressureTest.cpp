@@ -1,11 +1,11 @@
-#include "IpcQueue.hpp"
 #include "Server.hpp"
+#include "SharedRingBuffer.hpp"
 #include "TelemetryCodec.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <fcntl.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -25,6 +25,8 @@ std::string frameBytes(std::uint64_t timestamp = 3)
 }
 
 constexpr auto frameSize = telemetry::protocol::kFrameSize;
+constexpr std::size_t pauseIngressBytes = 3 * 1024 * 1024;
+constexpr std::size_t resumeIngressBytes = 1 * 1024 * 1024;
 
 struct Descriptor {
     int fd;
@@ -43,13 +45,9 @@ struct Descriptor {
 struct DescriptorPair {
     int fds[2] = {-1, -1};
 
-    explicit DescriptorPair(bool pipe = false)
+    DescriptorPair()
     {
-        if (pipe) {
-            REQUIRE(pipe2(fds, O_NONBLOCK | O_CLOEXEC) == 0);
-        } else {
-            REQUIRE(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) == 0);
-        }
+        REQUIRE(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, fds) == 0);
     }
     ~DescriptorPair()
     {
@@ -70,21 +68,24 @@ struct DescriptorPair {
 struct ServerTestAccess {
     Descriptor epoll{epoll_create1(EPOLL_CLOEXEC)};
     DescriptorPair listener;
-    DescriptorPair pipe{true};
     DescriptorPair client;
     int clientFd = client.fds[0];
-    IpcQueue queue;
     bool paused = false;
     Server::State state = Server::State::Running;
     Server server;
+    SharedRingBuffer ring;
+
+    Descriptor dataReady{eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)};
+    Descriptor spaceReady{eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)};
 
     ServerTestAccess()
     {
         REQUIRE(server.addEpollFd(epoll.fd, listener.fds[0], EPOLLIN | EPOLLERR | EPOLLHUP));
-        REQUIRE(server.addEpollFd(epoll.fd, pipe.fds[1], EPOLLERR | EPOLLHUP));
         REQUIRE(server.addEpollFd(epoll.fd, clientFd, EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP));
         server.m_clients.emplace(clientFd, Server::ClientState{});
         client.fds[0] = -1; // Server now owns this descriptor.
+        REQUIRE(ring.create());
+        REQUIRE(server.addEpollFd(epoll.fd, spaceReady.fd, EPOLLIN | EPOLLERR | EPOLLHUP));
     }
 
     bool event(int fd, std::uint32_t events)
@@ -92,8 +93,8 @@ struct ServerTestAccess {
         epoll_event event{};
         event.data.fd = fd;
         event.events = events;
-        return server.handleEvent(event, epoll.fd, listener.fds[0], pipe.fds[1], queue, paused,
-                                  state);
+        return server.handleEvent(event, epoll.fd, listener.fds[0], ring, dataReady.fd,
+                                  spaceReady.fd, paused, state);
     }
 
     bool interest(bool enabled)
@@ -103,7 +104,7 @@ struct ServerTestAccess {
 
     bool enqueue(std::span<const std::byte> frame)
     {
-        return server.enqueueFrame(epoll.fd, pipe.fds[1], queue, frame);
+        return server.enqueueFrame(ring, dataReady.fd, frame);
     }
 
     void drainState()
@@ -129,32 +130,32 @@ struct ServerTestAccess {
         REQUIRE(write(fd, data.data(), data.size()) == static_cast<ssize_t>(data.size()));
     }
 
-    void fillPipe()
+    std::string fillRing(std::size_t bytes)
     {
-        const std::array<char, 4096> bytes{};
-        while (true) {
-            const ssize_t count = write(pipe.fds[1], bytes.data(), bytes.size());
-            if (count < 0) {
-                REQUIRE(errno == EAGAIN);
-                return;
-            }
-            REQUIRE(count > 0);
+        REQUIRE(ring.empty());
+        REQUIRE(bytes <= SharedRingBuffer::capacityBytes);
+        REQUIRE(bytes % frameSize == 0);
+        const auto frame = frameBytes(0);
+        std::string expected;
+        expected.reserve(bytes);
+        while (expected.size() < bytes) {
+            REQUIRE(ring.tryPush(std::as_bytes(std::span(frame))));
+            expected += frame;
         }
+        return expected;
     }
 
-    std::string readPipe()
+    std::string readRing()
     {
         std::string result;
-        std::array<char, 4096> bytes{};
-        while (true) {
-            const ssize_t count = read(pipe.fds[0], bytes.data(), bytes.size());
-            if (count < 0) {
-                REQUIRE(errno == EAGAIN);
-                return result;
-            }
-            REQUIRE(count > 0);
-            result.append(bytes.data(), static_cast<std::size_t>(count));
+        telemetry::protocol::Frame frame{};
+        while (ring.tryPop(frame)) {
+            result.append(reinterpret_cast<const char*>(frame.data()), frame.size());
         }
+        if (!result.empty()) {
+            REQUIRE(eventfd_write(spaceReady.fd, 1) == 0);
+        }
+        return result;
     }
 
     std::uint32_t readyEvents(int fd)
@@ -193,11 +194,10 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress interest toggles readability and ret
     REQUIRE((readyEvents(clientFd) & EPOLLRDHUP) != 0U);
 }
 
-TEST_CASE_METHOD(ServerTestAccess, "a full pipe pauses ingress at the high watermark",
+TEST_CASE_METHOD(ServerTestAccess, "ring occupancy pauses ingress at the high watermark",
                  "[backpressure]")
 {
-    fillPipe();
-    queue.data.assign(IpcQueue::pauseIngressThreshold - frameSize, std::byte{'x'});
+    const auto initial = fillRing(pauseIngressBytes - frameSize);
     const auto first = frameBytes(3);
     const auto second = frameBytes(4);
     const auto third = frameBytes(5);
@@ -206,10 +206,7 @@ TEST_CASE_METHOD(ServerTestAccess, "a full pipe pauses ingress at the high water
     send(client.fds[1], first + second + partial);
     REQUIRE(event(clientFd, EPOLLIN));
     REQUIRE(paused);
-    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold + frameSize);
-    const std::string_view queued(reinterpret_cast<const char*>(queue.data.data()),
-                                  queue.data.size());
-    REQUIRE(queued.ends_with(first + second));
+    REQUIRE(ring.pendingBytes() == pauseIngressBytes + frameSize);
     REQUIRE(pendingInput() == partial);
     REQUIRE(hasClient());
 
@@ -217,28 +214,24 @@ TEST_CASE_METHOD(ServerTestAccess, "a full pipe pauses ingress at the high water
     REQUIRE((readyEvents(clientFd) & EPOLLIN) == 0U);
     REQUIRE(event(clientFd, EPOLLIN)); // Readiness already returned before pausing.
     REQUIRE(pendingInput() == partial);
-    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold + frameSize);
+    REQUIRE(ring.pendingBytes() == pauseIngressBytes + frameSize);
 
-    readPipe();
-    std::string forwarded;
-    while (!queue.empty()) {
-        REQUIRE(event(pipe.fds[1], EPOLLOUT));
-        forwarded += readPipe();
-    }
+    const auto forwarded = readRing();
+    REQUIRE((readyEvents(spaceReady.fd) & EPOLLIN) != 0U);
+    REQUIRE(event(spaceReady.fd, EPOLLIN));
+    REQUIRE((readyEvents(spaceReady.fd) & EPOLLIN) == 0U);
     REQUIRE_FALSE(paused);
-    REQUIRE(forwarded ==
-            std::string(IpcQueue::pauseIngressThreshold - frameSize, 'x') + first + second);
+    REQUIRE(forwarded == initial + first + second);
     REQUIRE((readyEvents(clientFd) & EPOLLIN) != 0U);
     REQUIRE(event(clientFd, EPOLLIN));
-    REQUIRE(readPipe() == third);
+    REQUIRE(readRing() == third);
     REQUIRE(pendingInput().empty());
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "client reading stops before the next receive when paused",
                  "[backpressure]")
 {
-    fillPipe();
-    queue.data.assign(IpcQueue::pauseIngressThreshold - frameSize, std::byte{'x'});
+    const auto initial = fillRing(pauseIngressBytes - frameSize);
     // The first frame reaches the watermark. Finish the current 4096-byte receive,
     // but leave the second receive's worth of frames in the socket.
     std::string frames;
@@ -248,34 +241,36 @@ TEST_CASE_METHOD(ServerTestAccess, "client reading stops before the next receive
     send(client.fds[1], frames);
     REQUIRE(event(clientFd, EPOLLIN));
     REQUIRE(paused);
-    REQUIRE(queue.pendingBytes() == IpcQueue::pauseIngressThreshold - frameSize + 4096);
+    REQUIRE(ring.pendingBytes() == pauseIngressBytes - frameSize + 4096);
     REQUIRE(hasClient());
     REQUIRE(pendingInput().empty());
-    const std::string_view queued(reinterpret_cast<const char*>(queue.data.data()),
-                                  queue.data.size());
-    REQUIRE(queued.ends_with(frames.substr(0, 4096)));
     std::array<char, 8192> remaining{};
     REQUIRE(recv(clientFd, remaining.data(), remaining.size(), MSG_PEEK) == 4096);
     REQUIRE(std::string_view(remaining.data(), 4096) == frames.substr(4096));
+    REQUIRE(readRing() == initial + frames.substr(0, 4096));
 }
 
-TEST_CASE_METHOD(ServerTestAccess, "pipe events resume ingress only at the low watermark",
+TEST_CASE_METHOD(ServerTestAccess, "space notifications resume ingress only at the low watermark",
                  "[backpressure]")
 {
-    fillPipe(); // Keep pending bytes deterministic even for a stale EPOLLOUT event.
     REQUIRE(interest(false));
     paused = true;
-    queue.data.assign(IpcQueue::resumeIngressThreshold + 1, std::byte{'x'});
+    fillRing(resumeIngressBytes + frameSize);
     send(client.fds[1], frameBytes());
 
-    REQUIRE(event(pipe.fds[1], EPOLLOUT));
+    REQUIRE(eventfd_write(spaceReady.fd, 1) == 0);
+    REQUIRE(event(spaceReady.fd, EPOLLIN));
     REQUIRE(paused);
     REQUIRE((readyEvents(clientFd) & EPOLLIN) == 0U);
 
-    queue.offset = 1;
-    REQUIRE(event(pipe.fds[1], EPOLLOUT));
+    telemetry::protocol::Frame frame{};
+    REQUIRE(ring.tryPop(frame));
+    REQUIRE(ring.pendingBytes() == resumeIngressBytes);
+    REQUIRE(eventfd_write(spaceReady.fd, 1) == 0);
+    REQUIRE(event(spaceReady.fd, EPOLLIN));
     REQUIRE_FALSE(paused);
     REQUIRE((readyEvents(clientFd) & EPOLLIN) != 0U);
+    REQUIRE((readyEvents(spaceReady.fd) & EPOLLIN) == 0U);
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "draining never resumes ingress", "[backpressure]")
@@ -284,14 +279,15 @@ TEST_CASE_METHOD(ServerTestAccess, "draining never resumes ingress", "[backpress
     paused = true;
     drainState();
     const auto record = frameBytes();
-    REQUIRE(queue.appendFrame(std::as_bytes(std::span(record))));
+    REQUIRE(enqueue(std::as_bytes(std::span(record))));
     // Shutdown has already unregistered the listener; trying to resume would fail.
     REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, listener.fds[0], nullptr) == 0);
-    REQUIRE(event(pipe.fds[1], EPOLLOUT));
-    REQUIRE(queue.empty());
+    REQUIRE(readRing() == record);
+    REQUIRE(event(spaceReady.fd, EPOLLIN));
+    REQUIRE(ring.empty());
     REQUIRE(paused);
-    REQUIRE(readPipe() == record);
-    REQUIRE((readyEvents(pipe.fds[1]) & EPOLLOUT) == 0U);
+    REQUIRE((readyEvents(clientFd) & EPOLLIN) == 0U);
+    REQUIRE((readyEvents(spaceReady.fd) & EPOLLIN) == 0U);
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "paused listener ignores stale readability but reports errors",
@@ -311,14 +307,57 @@ TEST_CASE_METHOD(ServerTestAccess, "paused clients still process disconnect even
     REQUIRE_FALSE(hasClient());
 }
 
-TEST_CASE_METHOD(ServerTestAccess, "hard queue limit is a fatal enqueue failure", "[backpressure]")
+TEST_CASE_METHOD(ServerTestAccess, "a full ring is a fatal enqueue failure", "[backpressure]")
 {
-    queue.data.assign(IpcQueue::maxBufferSize, std::byte{'x'});
-    const auto original = queue.data;
+    const auto original = fillRing(SharedRingBuffer::capacityBytes);
     const auto overflow = frameBytes();
     REQUIRE_FALSE(enqueue(std::as_bytes(std::span(overflow))));
-    REQUIRE(queue.data == original);
-    REQUIRE(readPipe().empty());
+    REQUIRE(ring.pendingBytes() == SharedRingBuffer::capacityBytes);
+    eventfd_t notifications{};
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == -1);
+    REQUIRE(errno == EAGAIN);
+    REQUIRE(readRing() == original);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "enqueued frames wake the reader and coalesce notifications",
+                 "[backpressure]")
+{
+    const auto first = frameBytes(3);
+    const auto second = frameBytes(4);
+    REQUIRE(enqueue(std::as_bytes(std::span(first))));
+    REQUIRE(enqueue(std::as_bytes(std::span(second))));
+
+    eventfd_t notifications{};
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == 0);
+    REQUIRE(notifications == 2);
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == -1);
+    REQUIRE(errno == EAGAIN);
+    REQUIRE(readRing() == first + second);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "eventfd failures propagate from IPC handling", "[backpressure]")
+{
+    SECTION("reader notification failure")
+    {
+        REQUIRE(close(dataReady.fd) == 0);
+        dataReady.fd = -1;
+        send(client.fds[1], frameBytes());
+        REQUIRE_FALSE(event(clientFd, EPOLLIN));
+    }
+    SECTION("space notification read failure")
+    {
+        REQUIRE(close(spaceReady.fd) == 0);
+        spaceReady.fd = -1;
+        REQUIRE_FALSE(event(spaceReady.fd, EPOLLIN));
+    }
+    SECTION("space descriptor error")
+    {
+        REQUIRE_FALSE(event(spaceReady.fd, EPOLLERR));
+    }
+    SECTION("space descriptor hangup")
+    {
+        REQUIRE_FALSE(event(spaceReady.fd, EPOLLHUP));
+    }
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "ingress update failures propagate from event handling",
@@ -326,8 +365,7 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress update failures propagate from event
 {
     SECTION("pause failure")
     {
-        fillPipe();
-        queue.data.assign(IpcQueue::pauseIngressThreshold - frameSize, std::byte{'x'});
+        fillRing(pauseIngressBytes - frameSize);
         send(client.fds[1], frameBytes());
         REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, listener.fds[0], nullptr) == 0);
         REQUIRE_FALSE(event(clientFd, EPOLLIN));
@@ -337,7 +375,8 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress update failures propagate from event
     {
         paused = true;
         REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, clientFd, nullptr) == 0);
-        REQUIRE_FALSE(event(pipe.fds[1], EPOLLOUT));
+        REQUIRE(eventfd_write(spaceReady.fd, 1) == 0);
+        REQUIRE_FALSE(event(spaceReady.fd, EPOLLIN));
         REQUIRE(paused);
     }
 }

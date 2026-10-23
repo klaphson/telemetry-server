@@ -1,87 +1,103 @@
 # telemetry-server
 
 An educational Linux telemetry server written in C++20. It accepts fixed-size
-binary telemetry frames on TCP port 9000 by default, validates them, and forwards them through
-a pipe to a reader process that decodes the records, appends their binary frames
-to rotating files, and prints their fields.
+binary telemetry frames on TCP port 9000 by default, validates them, and forwards
+them through a shared memory ring to a reader process that decodes the records,
+appends their binary frames to rotating files, and prints their fields.
 
 ## Architecture
 
-Five static libraries, `Config`, `Server`, `Reader`, `Protocol`, and `Storage`, are linked
-into one executable, `telemetry-server`. Both `Server` and `Reader` use the binary
-codec provided by `Protocol`; `Reader` uses `Storage` to persist frames. TCP
-connections, the IPC pipe, and the data file use the same 32-byte frames.
+Six static libraries, `Config`, `Server`, `Reader`, `Protocol`, `Storage`, and
+`Ipc`, are linked into one executable, `telemetry-server`. Both `Server` and
+`Reader` use the binary codec provided by `Protocol`; `Reader` uses `Storage` to
+persist frames. TCP connections, the shared ring, and the data file use the same
+32-byte frames.
 
 ```text
-TCP clients → Server (parent process) → pipe → Reader (child process)
-                                                ├→ Storage → active file + archived segments
-                                                └→ stdout
+TCP clients → Server (parent process) → shared ring → Reader (child process)
+                                                       ├→ Storage → active file + archived segments
+                                                       └→ stdout
 ```
 
 `src/main.cpp` parses and validates CLI options through `Config`, then creates
-the pipe and calls `fork()`. It passes the selected port to the `Server`
-constructor through `ServerConfig` and the file and storage settings to the
-reader through `ReaderConfig`. The parent calls
-`Server::run(pipeWriteFd, signalFd, readerPid)`; the child calls
-`Reader::run(pipeReadFd, readerConfig)` directly.
+the shared ring and two eventfds and calls `fork()`. It passes the selected port
+to the `Server` constructor through `ServerConfig` and the file and storage
+settings to the reader through `ReaderConfig`. The parent calls
+`Server::run(ring, dataReadyFd, spaceReadyFd, signalFd, readerPid)`; the child calls
+`Reader::run(ring, dataReadyFd, spaceReadyFd, readerConfig)` directly.
 Both processes run the same executable, without launching a separate Reader
 executable through `exec()`.
 
 - `Config` provides `AppConfig` defaults, CLI parsing, validation, and usage text.
-  Help and argument errors exit before any pipe, child process, or listener is created.
-- `main()` owns the pipe descriptors, closes unused ends, and waits for the child
-  with `waitpid()` when the server returns. It ignores `SIGPIPE` so a closed reader
-  is reported as a write error. It blocks `SIGINT`, `SIGTERM`, and `SIGCHLD` before
-  forking and gives the parent a `signalfd` for shutdown and child-state notifications.
+  Help and argument errors exit before any shared ring, child process, or listener
+  is created.
+- `main()` owns the shared ring and eventfd descriptors and waits for the child
+  with `waitpid()` when the server returns. It blocks `SIGINT`, `SIGTERM`, and
+  `SIGCHLD` before forking and gives the parent a `signalfd` for shutdown and
+  child-state notifications.
 - `Server` uses nonblocking sockets and `epoll` to accept connections, read
-  binary frames, and write queued data to the pipe. `handleEvent()` dispatches one
-  event; `run()` owns the wait loop and cleanup.
+  binary frames, and push frames into the shared ring. `handleEvent()` dispatches
+  one event; `run()` owns the wait loop and cleanup.
 - `Server::m_clients` stores each client's input buffer. `ClientState` is a
   private nested struct. Disconnection and shutdown close client sockets and
   remove their entries; the destructor closes any remaining client sockets.
 - `Buffer`, defined in `Server/include/Buffer.hpp`, holds bytes in `data`, tracks
   the consumed prefix with `offset`, and compacts it when needed. Client input
-  uses a 4 KiB compaction threshold; `IpcQueue` inherits `Buffer` and uses 64 KiB.
-- `IpcQueue`, defined in `Server/include/IpcQueue.hpp`, buffers outgoing frames
-  and tracks partial writes. It is local to `Server::run()`.
-- `Reader` performs blocking pipe reads. Its private `readFrames()` method
-  accumulates bytes, decodes complete frames, appends them to storage, prints
-  their fields, and compacts its pending buffer. Invalid IPC frames, EOF with a
-  partial frame, or storage errors cause a failure exit.
+  uses a 4 KiB compaction threshold.
+- `SharedRingBuffer`, provided by `Ipc`, holds up to 4 MiB of frames in an anonymous
+  shared mapping created before `fork()`. Exactly one producer pushes frames and
+  one consumer pops them. The server pauses ingress at 3 MiB and checks the 1 MiB
+  resume threshold on space-ready notifications. The server notifies the reader
+  after each push; the reader notifies the server after draining all currently
+  available frames.
+- `Reader` pops complete frames from the ring, decodes them, appends them to
+  storage, and prints their fields. It blocks on the data-ready eventfd when idle.
+  Invalid IPC frames, eventfd errors, or storage errors cause a failure exit.
 - `FileStore`, provided by `Storage`, owns the active file and parent directory
   descriptors. It appends complete frames, recovers an incomplete trailing frame
   on open, rotates files at a configurable size limit, and syncs after a
   configurable number of appended bytes. It also exposes `sync()` for
   `fdatasync()` at clean reader EOF.
 
-The libraries borrow their pipe descriptors; `main()` closes them. Client
-connections belong to `Server`.
+The libraries borrow the ring and eventfd descriptors; `main()` owns their
+lifetimes. Client connections belong to `Server`.
 
 On `SIGINT` or `SIGTERM`, the server stops accepting clients, closes existing
-client connections, and drains its queued IPC data. The parent then closes the
-pipe write end so the reader can finish and receive EOF. The reader syncs its
-data file before logging EOF and returning success. Input that has not been
-queued is not part of this drain.
+client connections, and waits for the shared ring to drain. The parent then marks
+the producer closed and wakes the reader through the data-ready eventfd. The
+reader syncs its data file before logging EOF and returning success. Input that
+has not been queued is not part of this drain. The ring's close flag and eventfd
+notifications are separate operations performed by the caller.
 
-The server monitors `SIGCHLD` for the reader's PID. A reader exit, signal kill,
-or core dump observed while running or draining stops the server with failure,
-even if the reader exited with code zero. This detects reader loss while idle,
-without waiting for another client write. Reader stop and continue events are
-logged without initiating shutdown; notifications for other child PIDs are ignored.
-If one signal batch contains both reader termination and a shutdown request,
-reader failure takes precedence. `main()` still reaps the reader with `waitpid()`
+The server monitors `SIGCHLD` for the reader's PID. A delivered reader exit,
+signal kill, or core dump notification stops the server with failure, even if the
+reader exited with code zero. This works while idle, without another client
+write. Reader stop and continue notifications are logged without initiating
+shutdown; notifications for other child PIDs are ignored. If one signal batch
+contains both reader termination and a shutdown request, reader failure takes
+precedence. `main()` reaps the reader with `waitpid()` after the server returns
 and reports a nonzero exit code or terminating signal.
 
+Child-state notifications can merge. The server currently checks only the
+delivered notification, so a stop followed by reader death before the server
+handles `SIGCHLD` can leave it waiting with a zombie reader. It does not query
+the child's actual exit state while running.
+
+If the parent dies before closing the producer, the close flag remains unset
+and an idle reader receives no wake-up. The reader inherits blocked `SIGINT` and
+`SIGTERM` signals and can remain blocked on the data-ready eventfd, without
+performing its final sync.
+
 `main()` configures stdout for line buffering before `fork()`, including when
-output is redirected to a file. Log lines are flushed at newlines instead of after
-each `<<` insertion, preventing the observed mixing of server and reader log
-fragments. Ordering between the two processes can still vary.
+output is redirected to a file. Buffering individual `<<` insertions until a
+newline reduces interleaved partial log lines. Ordering between the two
+processes can still vary.
 
 ## Project layout
 
 ```text
 CMakeLists.txt                 Project settings, executable, and tests
-src/main.cpp                  Configuration wiring, pipe creation, and process management
+src/main.cpp                  Configuration wiring, shared IPC setup, and process management
 Config/
     CMakeLists.txt            Config static library
     include/AppConfig.hpp    Runtime settings and defaults
@@ -91,14 +107,20 @@ Config/
 Server/
     CMakeLists.txt            Server static library
     include/Server.hpp        Server interface and client state
-    include/Buffer.hpp        Shared byte storage, offset tracking, and compaction
-    include/IpcQueue.hpp      Outgoing pipe queue
+    include/Buffer.hpp        Client byte storage, offset tracking, and compaction
     src/Server.cpp            TCP and epoll handling
-    test/                     Catch2 queue, backpressure, and signal unit tests
+    test/                     Catch2 client buffer, backpressure, and signal unit tests
 Reader/
     CMakeLists.txt            Reader static library
     include/Reader.hpp        Reader interface
-    src/Reader.cpp            Pipe reads, frame decoding, and persistence
+    src/Reader.cpp            Shared ring consumption, frame decoding, and persistence
+Ipc/
+    CMakeLists.txt            Ipc static library
+    include/SharedRingBuffer.hpp  Shared ring API and capacity
+    include/EventFd.hpp       Eventfd notification helpers
+    src/SharedRingBuffer.cpp  Shared mapping and frame queue
+    src/EventFd.cpp           Eventfd reads and writes with EINTR handling
+    test/SharedRingBufferTest.cpp  Catch2 shared ring and fork tests
 Protocol/
     CMakeLists.txt            Protocol static library
     include/TelemetryRecord.hpp  Telemetry data fields and equality comparison
@@ -110,7 +132,7 @@ Storage/
     include/FileStore.hpp    Storage configuration, append and sync API
     src/FileStore.cpp        File writes, rotation, syncing, and partial-tail recovery
     test/FileStoreTest.cpp   Catch2 storage unit tests
-tests/process_smoke.sh        Binary TCP/pipe flow and reader-failure integration test
+tests/process_smoke.sh        Binary TCP/shared ring flow and reader-failure integration test
 tests/graceful_shutdown.sh    SIGTERM drain, persistence, reader signals, and failure tests
 packaging/systemd/telemetry-server.service  systemd service unit for a Linux host
 ```
@@ -118,7 +140,7 @@ packaging/systemd/telemetry-server.service  systemd service unit for a Linux hos
 ## Build and run on Linux
 
 Requirements: a C++20 compiler, CMake 3.24 or newer, Ninja, and Make.
-The server uses Linux APIs including `epoll`, `accept4()`, `pipe2()`, and `signalfd()`.
+The server uses Linux APIs including `epoll`, `accept4()`, `mmap()`, `eventfd()`, and `signalfd()`.
 
 From the project root:
 
@@ -283,7 +305,7 @@ Expected reader output:
 
 One `printf` does not guarantee one TCP read. The server assembles fragmented
 frames and processes multiple complete frames received together. The reader
-also handles partial frames and multiple frames in each pipe read.
+receives complete frames from the shared ring.
 
 Keep each quoted byte string on one line. A backslash followed by a newline
 **inside single quotes** adds literal bytes `5c 0a`, corrupting the frame.
@@ -298,10 +320,15 @@ quotes, as in the two-frame example. Use `>&3` to write to the open connection.
   trailing bytes are discarded; the server logs the partial frame.
 - The server disconnects clients whose pending input exceeds 64 KiB.
 - At 3 MiB of pending IPC data, the server pauses accepting and reading clients
-  after processing the complete frames in the current receive. It resumes when
-  pending data falls to 1 MiB or below, unless it is shutting down.
-- The IPC queue allows at most 4 MiB of pending data. An enqueue that would exceed
-  this hard limit fails and stops the server with an error.
+  after processing the complete frames in the current receive. On a space-ready
+  notification, it resumes if pending data is at most 1 MiB, unless it is shutting
+  down. The reader sends this notification after draining all currently available
+  frames, so resumption can wait until the ring is empty.
+- The shared ring holds at most 4 MiB of pending frame data. An enqueue that would
+  exceed this hard limit fails and stops the server with an error.
+- Disconnect events close clients even while ingress reads are paused. A client
+  that closes or half-closes during a pause can lose unread frames buffered in
+  its socket or client input buffer.
 
 ## Binary telemetry codec
 
@@ -417,8 +444,9 @@ frame brings the bytes appended since the last successful sync to at least
 The interval need not be a multiple of 32; it is checked after each complete
 frame. This is a byte threshold, not a timer.
 
-Storage also calls `fdatasync()` before rotation, and the reader calls it at clean
-pipe EOF. Setting `syncEveryBytes` to zero disables only byte-based syncing.
+Storage also calls `fdatasync()` before rotation, and the reader calls it after
+the producer closes and the ring drains. Setting `syncEveryBytes` to zero
+disables only byte-based syncing.
 The parent directory is synced with `fsync()` after creating an active file and
 after renaming a segment. The `FileStore` destructor closes descriptors without
 an explicit sync; library callers should call `sync()` before successful shutdown.
@@ -455,22 +483,24 @@ Catch2 unit tests cover:
 - The binary codec: known wire bytes, integer boundaries, exact floating-point
   bits, truncated and oversized input, invalid headers, unaligned input, and
   error descriptions.
-- Shared buffer compaction, IPC queue thresholds, and reuse of consumed capacity.
+- Client buffer compaction and preservation of unread bytes.
+- Shared ring frame preservation, visibility across `fork()`, and draining after
+  producer closure.
 - File storage: exact bytes and size after appending two frames, removal of
   an incomplete trailing frame on open, and rotation before a third frame exceeds
   a two-frame segment limit, checking the active and archived file sizes.
 - Server backpressure: pause/resume, exact binary frame preservation, partial
   frames across a pause, stopping before the next receive, shutdown, and error
-  propagation, using nonblocking pipes and socket pairs.
+  propagation, using a shared ring, eventfds, and nonblocking socket pairs.
+  Tests also check coalesced reader notifications and eventfd error handling.
 - Server signals: empty input, repeated shutdown requests, reader termination
   while running or draining, nonterminal reader events, unrelated signals and
   child PIDs, batched notifications, and reader-failure precedence over shutdown.
-  Tests inject `signalfd_siginfo` records through a nonblocking pipe.
 
 These unit tests do not bind port 9000. Run all Catch2 tests with:
 
 ```bash
-ctest --test-dir build -R '^(ConfigParserTest|TelemetryCodecTest|FileStoreTest|IpcQueueTest|ServerBackpressureTest|ServerSignalTest)\.' --output-on-failure
+ctest --test-dir build -R '^(ConfigParserTest|TelemetryCodecTest|FileStoreTest|SharedRingBufferTest|BufferTest|ServerBackpressureTest|ServerSignalTest)\.' --output-on-failure
 ```
 
 Run just the CLI configuration tests after building:
@@ -502,8 +532,11 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 46 tests: 44 Catch2 cases (including 11 configuration
+The suite currently has 47 tests: 45 Catch2 cases (including 11 configuration
 cases and seven signal cases) and two process integration tests.
+Coverage gaps include merged child-state notifications, unexpected parent death,
+and unread-frame preservation during paused disconnects.
+
 The Bash smoke test sends a fragmented binary frame followed by another frame,
 checks decoded reader output, then terminates the reader to verify that the parent
 reports failure and the terminating signal. The graceful-shutdown test first
@@ -722,12 +755,12 @@ strace -f -e trace=process ./build/telemetry-server
 
 ## C++ note: `[[nodiscard]]`
 
-`Buffer::empty()` and `Buffer::pendingBytes()`, inherited by `IpcQueue`, use
+`Buffer::empty()` and `Buffer::pendingBytes()` use
 `[[nodiscard]]` to warn when a caller ignores their results:
 
 ```cpp
-const bool isEmpty = queue.empty();
+const bool isEmpty = buffer.empty();
 ```
 
 The attribute does not change runtime behavior. An explicit cast to `void`,
-such as `(void)queue.empty()`, indicates an intentionally discarded result.
+such as `(void)buffer.empty()`, indicates an intentionally discarded result.

@@ -1,9 +1,9 @@
 #include "Server.hpp"
-#include "IpcQueue.hpp"
+#include "EventFd.hpp"
+#include "SharedRingBuffer.hpp"
 #include "TelemetryCodec.hpp"
 
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/signalfd.h>
@@ -28,6 +28,8 @@ namespace
 constexpr int kMaxEvents = 64;
 constexpr std::size_t kReadBufferSize = 4096;
 constexpr std::size_t kMaxClientBuffer = 64 * 1024;
+constexpr std::size_t kPauseIngressBytes = 3 * 1024 * 1024;
+constexpr std::size_t kResumeIngressBytes = 1 * 1024 * 1024;
 
 } // namespace
 
@@ -40,13 +42,9 @@ Server::~Server()
     }
 }
 
-int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
+int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int signalFd,
+                pid_t readerPid)
 {
-    if (!setNonBlocking(pipeWriteFd)) {
-        perror("fcntl pipe O_NONBLOCK");
-        return EXIT_FAILURE;
-    }
-
     int listen_fd = createSocket();
 
     if (listen_fd == -1) {
@@ -86,9 +84,9 @@ int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
         return EXIT_FAILURE;
     }
 
-    // Add pipe without EPOLLOUT initially. We enable it only when data is queued.
-    if (!addEpollFd(epoll_fd, pipeWriteFd, EPOLLERR | EPOLLHUP)) {
-        perror("epoll_ctl ADD pipe");
+    if (!addEpollFd(epoll_fd, spaceReadyFd, EPOLLIN | EPOLLERR | EPOLLHUP)) {
+
+        perror("epoll_ctl ADD spaceReady");
         close(epoll_fd);
         close(listen_fd);
         return EXIT_FAILURE;
@@ -101,7 +99,6 @@ int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
         return EXIT_FAILURE;
     }
 
-    IpcQueue ipcQueue;
     std::vector<epoll_event> events(kMaxEvents);
 
     std::cout << "[server] pid=" << getpid() << '\n'
@@ -113,7 +110,7 @@ int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
     bool ingressPaused = false;
 
     while (running) {
-        if (state == State::Draining && ipcQueue.empty()) {
+        if (state == State::Draining && ring.empty()) {
 
             result = EXIT_SUCCESS;
             break;
@@ -143,8 +140,8 @@ int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
                 continue;
             }
 
-            if (!handleEvent(event, epoll_fd, listen_fd, pipeWriteFd, ipcQueue, ingressPaused,
-                             state)) {
+            if (!handleEvent(event, epoll_fd, listen_fd, ring, dataReadyFd, spaceReadyFd,
+                             ingressPaused, state)) {
                 running = false;
                 break;
             }
@@ -159,16 +156,6 @@ int Server::run(int pipeWriteFd, int signalFd, pid_t readerPid)
     close(epoll_fd);
 
     return result;
-}
-
-bool Server::setNonBlocking(int fd) const
-{
-    const int flags = fcntl(fd, F_GETFL, 0);
-    if (flags == -1) {
-        return false;
-    }
-
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK) != -1;
 }
 
 int Server::createSocket() const
@@ -210,8 +197,9 @@ bool Server::modifyEpollFd(int epoll_fd, int fd, std::uint32_t events) const
     return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event) != -1;
 }
 
-bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, int pipeWriteFd,
-                         IpcQueue &ipcQueue, bool &ingressPaused, State &state)
+bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd,
+                         SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
+                         bool &ingressPaused, State &state)
 {
     const int fd = event.data.fd;
     const std::uint32_t eventMask = event.events;
@@ -231,30 +219,29 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, in
         return true;
     }
 
-    if (fd == pipeWriteFd) {
-        if ((eventMask & EPOLLOUT) != 0U) {
-            if (!flushIpcQueue(pipeWriteFd, ipcQueue)) {
+    if (fd == spaceReadyFd) {
+        if ((eventMask & EPOLLIN) != 0U) {
+            if (!telemetry::ipc::consumeEvent(spaceReadyFd)) {
                 return false;
             }
 
-            if (!updatePipeInterest(epollFd, pipeWriteFd, !ipcQueue.empty())) {
-                perror("epoll_ctl MOD pipe");
-                return false;
-            }
-
-            if (state == State::Running && ingressPaused && ipcQueue.canResumeIngress()) {
+            if (state == State::Running && ingressPaused &&
+                ring.pendingBytes() <= kResumeIngressBytes) {
 
                 if (!updateIngressInterest(epollFd, listenFd, true)) {
-                    perror("epoll_ctl MOD ingress resume");
+                    perror("epoll_ctl ingress resume");
                     return false;
                 }
 
                 ingressPaused = false;
+
+                std::cout << "[server] ingress resumed, IPC pending=" << ring.pendingBytes()
+                          << '\n';
             }
         }
 
         if ((eventMask & (EPOLLERR | EPOLLHUP)) != 0U) {
-            std::cerr << "[server] reader pipe closed/error\n";
+            std::cerr << "[server] space eventfd error\n";
             return false;
         }
 
@@ -265,7 +252,7 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, in
 
         bool pauseRequested = false;
 
-        if (!readClient(epollFd, fd, pipeWriteFd, ipcQueue, pauseRequested)) {
+        if (!readClient(epollFd, fd, ring, dataReadyFd, pauseRequested)) {
             return false;
         }
 
@@ -277,12 +264,14 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd, in
 
             ingressPaused = true;
 
-            std::cout << "[server] ingress paused, IPC pending=" << ipcQueue.pendingBytes() << '\n';
+            std::cout << "[server] ingress paused, ring buffer pending=" << ring.pendingBytes()
+                      << '\n';
 
             return true;
         }
     }
 
+    // Disconnect events close the client even while ingress reads are paused.
     if ((eventMask & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0U) {
         if (m_clients.find(fd) != m_clients.end()) {
             removeClient(epollFd, fd);
@@ -331,7 +320,7 @@ bool Server::acceptClients(int epoll_fd, int listen_fd)
     }
 }
 
-bool Server::readClient(int epollFd, int clientFd, int pipeFd, IpcQueue &ipcQueue,
+bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int dataReadyFd,
                         bool &pauseIngressRequested)
 {
     using namespace telemetry::protocol;
@@ -386,13 +375,13 @@ bool Server::readClient(int epollFd, int clientFd, int pipeFd, IpcQueue &ipcQueu
                           << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
                           << " value=" << record.value << '\n';
 
-                if (!enqueueFrame(epollFd, pipeFd, ipcQueue, frame)) {
+                if (!enqueueFrame(ring, dataReadyFd, frame)) {
                     return false;
                 }
 
                 client.inputBuffer.offset += kFrameSize;
 
-                if (ipcQueue.shouldPauseIngress()) {
+                if (ring.pendingBytes() >= kPauseIngressBytes) {
                     pauseIngressRequested = true;
                 }
             }
@@ -452,69 +441,19 @@ void Server::removeAllClients(int epollFd)
     }
 }
 
-bool Server::enqueueFrame(int epoll_fd, int pipe_fd, IpcQueue &queue,
+bool Server::enqueueFrame(SharedRingBuffer &ring, int dataReadyFd,
                           std::span<const std::byte> frame) const
 {
-    if (!queue.appendFrame(frame)) {
-        std::cerr << "[server] IPC queue hard limit reached "
-                  << "despite backpressure, pending=" << queue.pendingBytes() << '\n';
-
+    if (!ring.tryPush(frame)) {
+        std::cerr << "[server] shared ring full or unavailable\n";
         return false;
     }
 
-    if (!flushIpcQueue(pipe_fd, queue)) {
-        return false;
-    }
-
-    if (!updatePipeInterest(epoll_fd, pipe_fd, !queue.empty())) {
-        perror("epoll_ctl MOD pipe");
+    if (!telemetry::ipc::notifyEvent(dataReadyFd)) {
         return false;
     }
 
     return true;
-}
-
-bool Server::flushIpcQueue(int pipe_fd, IpcQueue &queue) const
-{
-    while (!queue.empty()) {
-        const std::byte* data = queue.data.data() + queue.offset;
-        const std::size_t remaining = queue.pendingBytes();
-
-        const ssize_t n = write(pipe_fd, data, remaining);
-
-        if (n > 0) {
-            queue.offset += static_cast<std::size_t>(n);
-            continue;
-        }
-
-        if (n == -1 && errno == EINTR) {
-            continue;
-        }
-
-        if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            return true;
-        }
-
-        if (n == -1 && errno == EPIPE) {
-            std::cerr << "[server] reader closed the pipe\n";
-            return false;
-        }
-
-        perror("write(pipe)");
-        return false;
-    }
-
-    queue.compactIfNeeded();
-    return true;
-}
-
-bool Server::updatePipeInterest(int epoll_fd, int pipe_fd, bool want_epollout) const
-{
-    const std::uint32_t events = want_epollout
-                                     ? static_cast<std::uint32_t>(EPOLLOUT | EPOLLERR | EPOLLHUP)
-                                     : static_cast<std::uint32_t>(EPOLLERR | EPOLLHUP);
-
-    return modifyEpollFd(epoll_fd, pipe_fd, events);
 }
 
 bool Server::handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
@@ -570,6 +509,7 @@ bool Server::handleSignalFd(int signalFd, pid_t readerPid, SignalState &signalSt
 
             if (info.ssi_signo == static_cast<std::uint32_t>(SIGCHLD)) {
 
+                // Child-state notifications can merge; only the delivered state is checked.
                 if (info.ssi_pid != static_cast<std::uint32_t>(readerPid)) {
 
                     continue;

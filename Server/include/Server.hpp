@@ -11,11 +11,12 @@
 #include <sys/types.h>
 
 struct epoll_event;
-struct IpcQueue;
 
 struct ServerConfig {
     std::uint16_t port = 9000;
 };
+
+class SharedRingBuffer;
 
 class Server
 {
@@ -28,8 +29,9 @@ class Server
     Server(Server &&) = delete;
     Server &operator=(Server &&) = delete;
 
-    // Borrows the descriptor; the caller closes it after run() returns.
-    int run(int pipeWriteFd, int signalFd, pid_t readerPid);
+    // Borrows the ring and descriptors; the caller owns their lifetimes.
+    int run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int signalFd,
+            pid_t readerPid);
 
   private:
     friend struct ServerTestAccess;
@@ -49,7 +51,6 @@ class Server
     std::unordered_map<int, ClientState> m_clients;
 
     // Socket setup
-    bool setNonBlocking(int fd) const;
     int createSocket() const;
     bool setSocketOptions(int fd) const;
     bool bindSocket(int fd) const;
@@ -59,21 +60,19 @@ class Server
     bool modifyEpollFd(int epoll_fd, int fd, std::uint32_t events) const;
 
     // Returns false only when the event requires stopping the server.
-    bool handleEvent(const epoll_event &event, int epollFd, int listenFd, int pipeWriteFd,
-                     IpcQueue &ipcQueue, bool &ingressPaused, State &state);
+    bool handleEvent(const epoll_event &event, int epollFd, int listenFd, SharedRingBuffer &ring,
+                     int dataReadyFd, int spaceReadyFd, bool &ingressPaused, State &state);
 
     // Client connections
     bool acceptClients(int epoll_fd, int listen_fd);
-    bool readClient(int epoll_fd, int client_fd, int pipe_fd, IpcQueue &ipcQueue,
+    bool readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int dataReadyFd,
                     bool &pauseIngressRequested);
     void removeClient(int epoll_fd, int client_fd);
     void removeAllClients(int epollFd);
 
-    // Pipe output
-    bool enqueueFrame(int epoll_fd, int pipe_fd, IpcQueue &queue,
+    // Shared ring output
+    bool enqueueFrame(SharedRingBuffer &ring, int dataReadyFd,
                       std::span<const std::byte> frame) const;
-    bool flushIpcQueue(int pipe_fd, IpcQueue &queue) const;
-    bool updatePipeInterest(int epoll_fd, int pipe_fd, bool want_epollout) const;
 
     bool handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
                            pid_t readerPid);

@@ -1,6 +1,7 @@
 add_library(
     Ipc STATIC
     src/SharedRingBuffer.cpp
+    src/EventFd.cpp
 )
 
 target_include_directories(

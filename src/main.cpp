@@ -1,9 +1,11 @@
 #include "AppConfig.hpp"
 #include "ConfigParser.hpp"
+#include "EventFd.hpp"
 #include "Reader.hpp"
 #include "Server.hpp"
+#include "SharedRingBuffer.hpp"
 
-#include <fcntl.h>
+#include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -63,12 +65,6 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    // Report a closed reader through write() instead of terminating on SIGPIPE.
-    if (std::signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        perror("signal");
-        return EXIT_FAILURE;
-    }
-
     sigset_t signalMask{};
 
     if (!blockManagedSignals(signalMask)) {
@@ -76,8 +72,7 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    // Flush complete lines, including when redirected to a file. Flushing each
-    // insertion lets the server and reader interleave fragments of their logs.
+    // Use line-buffered stdout in both processes, including with redirected output.
     if (std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ) != 0) {
         std::cerr << "[main] failed to configure stdout line buffering\n";
         return EXIT_FAILURE;
@@ -91,39 +86,66 @@ int main(int argc, char* argv[])
 
     const ServerConfig serverConfig{.port = config.port};
 
-    int pipeFds[2]{};
-    if (pipe2(pipeFds, O_CLOEXEC) == -1) {
-        perror("pipe2");
+    SharedRingBuffer ring;
+
+    if (!ring.create()) {
+        return EXIT_FAILURE;
+    }
+
+    const int dataReadyFd = eventfd(0, EFD_CLOEXEC);
+
+    if (dataReadyFd == -1) {
+        perror("eventfd dataReady");
+        return EXIT_FAILURE;
+    }
+
+    const int spaceReadyFd = eventfd(0, EFD_CLOEXEC);
+
+    if (spaceReadyFd == -1) {
+        perror("eventfd spaceReady");
+        close(dataReadyFd);
         return EXIT_FAILURE;
     }
 
     const pid_t readerPid = fork();
     if (readerPid == -1) {
         perror("fork");
-        close(pipeFds[0]);
-        close(pipeFds[1]);
+        close(dataReadyFd);
+        close(spaceReadyFd);
         return EXIT_FAILURE;
     }
 
     if (readerPid == 0) {
-        close(pipeFds[1]);
-        const int result = Reader{}.run(pipeFds[0], readerConfig);
-        close(pipeFds[0]);
+        const int result = Reader{}.run(ring, dataReadyFd, spaceReadyFd, readerConfig);
+        close(dataReadyFd);
+        close(spaceReadyFd);
         std::cout.flush();
         std::cerr.flush();
         _exit(result);
     }
-
-    close(pipeFds[0]);
 
     const int signalFd = signalfd(-1, &signalMask, SFD_NONBLOCK | SFD_CLOEXEC);
 
     if (signalFd == -1) {
         perror("signalfd");
 
-        close(pipeFds[1]);
+        // No server will produce any more frames.
+        ring.closeProducer();
+
+        // Try to wake Reader for a graceful exit.
+        if (!telemetry::ipc::notifyEvent(dataReadyFd)) {
+
+            // If wake-up fails, terminate the child.
+            if (kill(readerPid, SIGKILL) == -1 && errno != ESRCH) {
+                perror("kill reader");
+            }
+        }
+
+        close(dataReadyFd);
+        close(spaceReadyFd);
 
         int status = 0;
+
         while (waitpid(readerPid, &status, 0) == -1) {
             if (errno != EINTR) {
                 perror("waitpid");
@@ -134,9 +156,27 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
 
-    const int serverResult = Server{serverConfig}.run(pipeFds[1], signalFd, readerPid);
+    int serverResult =
+        Server{serverConfig}.run(ring, dataReadyFd, spaceReadyFd, signalFd, readerPid);
+
+    // Tell Reader that no more frames will be produced.
+    ring.closeProducer();
+
+    // Wake Reader so it can drain remaining frames and exit.
+    if (!telemetry::ipc::notifyEvent(dataReadyFd)) {
+        std::cerr << "[main] failed to notify reader during shutdown\n";
+
+        serverResult = EXIT_FAILURE;
+
+        // Emergency shutdown: Reader may be blocked in eventfd_read().
+        if (kill(readerPid, SIGKILL) == -1 && errno != ESRCH) {
+            perror("kill reader");
+        }
+    }
+
     close(signalFd);
-    close(pipeFds[1]); // Let the reader drain the pipe and receive EOF.
+    close(dataReadyFd);
+    close(spaceReadyFd);
 
     int status = 0;
     while (waitpid(readerPid, &status, 0) == -1) {

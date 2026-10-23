@@ -42,7 +42,7 @@ add_subdirectory(Server)
 add_subdirectory(Reader)
 
 add_executable(telemetry-server src/main.cpp)
-target_link_libraries(telemetry-server PRIVATE Config Server Reader telemetry_build_options)
+target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetry_build_options)
 
 if(BUILD_TESTING)
     add_test(NAME telemetry_process_smoke
