@@ -205,6 +205,7 @@ With no arguments, the server uses these defaults:
 | `--data-file PATH` | `telemetry.bin` | Nonempty path; parent directory must already exist |
 | `--segment-bytes BYTES` | `67108864` (64 MiB) | At least 32 bytes and a multiple of 32 |
 | `--sync-bytes BYTES` | `1048576` (1 MiB) | Zero to disable byte-based syncing, or at most the segment size |
+| `--quiet` | Off | Suppress per-record Server and Reader logs; startup and errors remain visible |
 
 Supply each value as a separate argument, such as `--port 9100`.
 The `--port=9100` form and positional arguments are not supported. Numeric
@@ -701,6 +702,43 @@ After editing the installed unit, run `sudo systemctl daemon-reload` followed by
 `sudo systemctl restart telemetry-server.service`. To update the executable,
 stop the service, repeat the executable installation command, and start it with
 `sudo systemctl start telemetry-server.service`.
+
+## TCP end-to-end benchmark
+
+The optional benchmark uses the existing `Protocol::encode()` to create valid
+32-byte frames and sends them through loopback TCP. It measures the sender time
+separately from the full pipeline, waits for the expected output size, terminates
+the server through SIGTERM and verifies the Reader's clean EOF.
+
+Inside the Linux dev container:
+
+```bash
+make benchmark
+```
+
+For a custom run after the release binaries are built:
+
+```bash
+bash bench/run_benchmark.sh 200000 128 19000
+```
+
+Arguments are frame count, frames per TCP send batch, and port. Defaults are
+100,000 frames, 128 per batch, and port 19000. The workload is limited to
+1,000,000 frames (32 MiB) to avoid triggering the default 64 MiB segment
+rotation. Benchmark output files are created in a temporary directory and
+removed on exit. Do not use a port already occupied by another server.
+
+`sender_frames_per_second` only measures the time it takes to send the bytes
+to TCP. `end_to_end_frames_per_second` includes sending, writing the entire
+output file, graceful shutdown and final sync. The script checks byte count and
+Reader EOF, but not the content of every stored frame.
+
+The `--quiet` server option silences per-record logging so formatting terminal
+messages does not dominate the result. Lifecycle and error messages remain.
+This measures the entire pipeline, not shared-memory IPC alone. Repeat tests
+under comparable load and report a median instead of a single number.
+Docker Desktop adds Linux VM overhead. For syscall counts, run a separate
+`strace -f -c` experiment: tracing itself affects throughput.
 
 ## Formatting and Git hooks
 

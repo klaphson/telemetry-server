@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TELEMETRY_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(TELEMETRY_BUILD_BENCHMARKS "Build load generator" OFF)
 
 add_library(telemetry_build_options INTERFACE)
 target_compile_options(telemetry_build_options INTERFACE
@@ -43,6 +44,11 @@ add_subdirectory(Reader)
 
 add_executable(telemetry-server src/main.cpp)
 target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetry_build_options)
+
+if(TELEMETRY_BUILD_BENCHMARKS)
+    add_executable(telemetry-load bench/telemetry_load.cpp)
+    target_link_libraries(telemetry-load PRIVATE Protocol telemetry_build_options)
+endif()
 
 if(BUILD_TESTING)
     add_test(NAME telemetry_process_smoke

@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -22,6 +22,11 @@ run-service: build
 
 test: build
 	ctest --test-dir build --output-on-failure
+
+benchmark:
+	cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTELEMETRY_BUILD_BENCHMARKS=ON
+	cmake --build build-bench
+	bash bench/run_benchmark.sh
 
 clean:
 	rm -rf build
