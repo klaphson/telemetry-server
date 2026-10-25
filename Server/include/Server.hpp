@@ -14,6 +14,7 @@ struct epoll_event;
 
 struct ServerConfig {
     std::uint16_t port = 9000;
+    bool quiet = false;
 };
 
 class SharedRingBuffer;

@@ -387,9 +387,12 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
 
                 const TelemetryRecord &record = decoded.record;
 
-                std::cout << "[server] fd=" << clientFd << " sensor=" << record.sensorId
-                          << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
-                          << " value=" << record.value << '\n';
+                if (!m_config.quiet) {
+                    std::cout << "[server] fd=" << clientFd << " sensor=" << record.sensorId
+                              << " metric=" << record.metricId
+                              << " timestamp_ns=" << record.timestampNs << " value=" << record.value
+                              << '\n';
+                }
 
                 if (!enqueueFrame(ring, frame)) {
                     // The parent will notify the reader when shutting down.

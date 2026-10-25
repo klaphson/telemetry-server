@@ -90,6 +90,11 @@ ParseStatus parseArguments(int argc, char* const argv[], AppConfig &config,
             return ParseStatus::HelpRequested;
         }
 
+        if (argument == "--quiet") {
+            config.quiet = true;
+            continue;
+        }
+
         auto nextValue = [&]() -> std::optional<std::string_view> {
             if (index + 1 >= argc) {
                 errorOutput << "missing value for " << argument << '\n';
@@ -179,6 +184,7 @@ void printUsage(std::ostream &output, std::string_view programName)
            << "  --data-file PATH\n"
            << "  --segment-bytes BYTES\n"
            << "  --sync-bytes BYTES\n"
+           << "  --quiet (suppress per-record logs)\n"
            << "  -h, --help\n";
 }
 

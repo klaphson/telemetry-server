@@ -51,6 +51,8 @@ TEST_CASE("configuration uses defaults without arguments")
 
     REQUIRE(config.syncEveryBytes == 1 * 1024 * 1024);
 
+    REQUIRE_FALSE(config.quiet);
+
     REQUIRE(errors.str().empty());
 }
 
@@ -90,6 +92,17 @@ TEST_CASE("configuration parses runtime options")
     REQUIRE(config.maxSegmentBytes == 1048576);
 
     REQUIRE(config.syncEveryBytes == 262144);
+}
+
+TEST_CASE("quiet suppresses record logs without changing other runtime options")
+{
+    AppConfig config;
+    std::ostringstream errors;
+
+    REQUIRE(parseOptions({"--quiet", "--port", "9100"}, config, errors) == ParseStatus::Success);
+    REQUIRE(config.quiet);
+    REQUIRE(config.port == 9100);
+    REQUIRE(errors.str().empty());
 }
 
 TEST_CASE("configuration rejects ports outside the allowed range")

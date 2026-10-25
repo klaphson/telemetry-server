@@ -82,9 +82,11 @@ int main(int argc, char* argv[])
 
                                     .maxSegmentBytes = config.maxSegmentBytes,
 
-                                    .syncEveryBytes = config.syncEveryBytes};
+                                    .syncEveryBytes = config.syncEveryBytes,
 
-    const ServerConfig serverConfig{.port = config.port};
+                                    .quiet = config.quiet};
+
+    const ServerConfig serverConfig{.port = config.port, .quiet = config.quiet};
 
     SharedRingBuffer ring;
 

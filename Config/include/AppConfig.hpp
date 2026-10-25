@@ -16,6 +16,8 @@ struct AppConfig {
     std::size_t maxSegmentBytes = 64 * 1024 * 1024;
 
     std::size_t syncEveryBytes = 1 * 1024 * 1024;
+
+    bool quiet = false;
 };
 
 } // namespace telemetry::config

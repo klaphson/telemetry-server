@@ -10,6 +10,7 @@ struct ReaderConfig {
     std::string dataFilePath;
     std::size_t maxSegmentBytes;
     std::size_t syncEveryBytes;
+    bool quiet = false;
 };
 
 class Reader

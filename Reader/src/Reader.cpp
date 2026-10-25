@@ -48,9 +48,11 @@ int Reader::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
 
             const TelemetryRecord &record = decoded.record;
 
-            std::cout << "[reader] telemetry:" << " sensor=" << record.sensorId
-                      << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
-                      << " value=" << record.value << '\n';
+            if (!config.quiet) {
+                std::cout << "[reader] telemetry:" << " sensor=" << record.sensorId
+                          << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
+                          << " value=" << record.value << '\n';
+            }
         }
 
         // Notify the server once after draining the frames currently available.
