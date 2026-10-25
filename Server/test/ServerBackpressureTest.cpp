@@ -173,7 +173,7 @@ struct ServerTestAccess {
     }
 };
 
-TEST_CASE_METHOD(ServerTestAccess, "ingress interest toggles readability and retains hangups",
+TEST_CASE_METHOD(ServerTestAccess, "paused clients leave epoll but keep their socket data",
                  "[backpressure]")
 {
     send(listener.fds[1], "pending connection");
@@ -183,14 +183,17 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress interest toggles readability and ret
 
     REQUIRE(interest(false));
     REQUIRE((readyEvents(listener.fds[0]) & EPOLLIN) == 0U);
-    REQUIRE((readyEvents(clientFd) & EPOLLIN) == 0U);
+    REQUIRE(readyEvents(clientFd) == 0U);
+    REQUIRE(hasClient());
+
+    // A peer may finish sending while ingress is paused.
+    REQUIRE(shutdown(client.fds[1], SHUT_WR) == 0);
+    REQUIRE(readyEvents(clientFd) == 0U);
+    REQUIRE(hasClient());
 
     REQUIRE(interest(true));
     REQUIRE((readyEvents(listener.fds[0]) & EPOLLIN) != 0U);
     REQUIRE((readyEvents(clientFd) & EPOLLIN) != 0U);
-
-    REQUIRE(interest(false));
-    REQUIRE(shutdown(client.fds[1], SHUT_WR) == 0);
     REQUIRE((readyEvents(clientFd) & EPOLLRDHUP) != 0U);
 }
 
@@ -299,12 +302,56 @@ TEST_CASE_METHOD(ServerTestAccess, "paused listener ignores stale readability bu
     REQUIRE_FALSE(event(listener.fds[0], EPOLLIN | EPOLLERR));
 }
 
-TEST_CASE_METHOD(ServerTestAccess, "paused clients still process disconnect events",
+TEST_CASE_METHOD(ServerTestAccess, "stale hangup cannot discard paused client data",
                  "[backpressure]")
 {
+    REQUIRE(interest(false));
     paused = true;
-    REQUIRE(event(clientFd, EPOLLRDHUP));
+    const auto expected = frameBytes(17);
+    send(client.fds[1], expected);
+    REQUIRE(shutdown(client.fds[1], SHUT_WR) == 0);
+
+    // Simulate a stale event returned just before EPOLL_CTL_DEL.
+    REQUIRE(event(clientFd, EPOLLRDHUP | EPOLLHUP));
+    REQUIRE(hasClient());
+    REQUIRE(ring.empty());
+
+    REQUIRE(interest(true));
+    paused = false;
+    REQUIRE(event(clientFd, EPOLLIN | EPOLLRDHUP));
     REQUIRE_FALSE(hasClient());
+    REQUIRE(readRing() == expected);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "backpressure preserves remaining frames after sender EOF",
+                 "[backpressure]")
+{
+    const auto initial = fillRing(pauseIngressBytes - frameSize);
+    std::string frames;
+    for (std::uint64_t timestamp = 0; frames.size() < 8192; ++timestamp) {
+        frames += frameBytes(timestamp);
+    }
+    send(client.fds[1], frames);
+    REQUIRE(shutdown(client.fds[1], SHUT_WR) == 0);
+
+    // The first recv fills the ring over the high watermark.
+    REQUIRE(event(clientFd, EPOLLIN | EPOLLRDHUP));
+    REQUIRE(paused);
+    REQUIRE(hasClient());
+    REQUIRE(readyEvents(clientFd) == 0U);
+
+    // Even an already-queued hangup must not discard the socket's 4096 bytes.
+    REQUIRE(event(clientFd, EPOLLRDHUP | EPOLLHUP));
+    REQUIRE(hasClient());
+    const auto forwarded = readRing();
+    REQUIRE(event(spaceReady.fd, EPOLLIN));
+    REQUIRE_FALSE(paused);
+
+    // Re-registering EPOLLIN allows the remaining bytes and EOF to be read.
+    REQUIRE((readyEvents(clientFd) & EPOLLIN) != 0U);
+    REQUIRE(event(clientFd, EPOLLIN | EPOLLRDHUP));
+    REQUIRE_FALSE(hasClient());
+    REQUIRE(forwarded + readRing() == initial + frames);
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "a full ring is a fatal enqueue failure", "[backpressure]")
@@ -421,10 +468,13 @@ TEST_CASE_METHOD(ServerTestAccess, "ingress update failures propagate from event
     }
     SECTION("resume failure")
     {
+        // The normal resume uses EPOLL_CTL_ADD because pausing unregisters
+        // the client. Force that ADD to fail with EEXIST by leaving the
+        // client registered, rather than removing it (which makes ADD work).
         paused = true;
-        REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, clientFd, nullptr) == 0);
         REQUIRE(eventfd_write(spaceReady.fd, 1) == 0);
         REQUIRE_FALSE(event(spaceReady.fd, EPOLLIN));
         REQUIRE(paused);
+        REQUIRE(hasClient());
     }
 }

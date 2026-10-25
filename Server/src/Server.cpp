@@ -197,6 +197,11 @@ bool Server::modifyEpollFd(int epoll_fd, int fd, std::uint32_t events) const
     return epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event) != -1;
 }
 
+bool Server::removeEpollFd(int epollFd, int fd) const
+{
+    return epoll_ctl(epollFd, EPOLL_CTL_DEL, fd, nullptr) != -1;
+}
+
 bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd,
                          SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
                          bool &ingressPaused, State &state)
@@ -271,7 +276,15 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd,
         }
     }
 
-    // Disconnect events close the client even while ingress reads are paused.
+    // During backpressure the client is intentionally absent from epoll.
+    // A previously returned event may still contain RDHUP/HUP: do not
+    // close the socket, since its receive buffer may contain unread frames.
+    if (ingressPaused) {
+        return true;
+    }
+
+    // Without a pause, readClient() drains the socket until EAGAIN or EOF.
+    // An isolated hangup/error (without readable data) can be closed here.
     if ((eventMask & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) != 0U) {
         if (m_clients.find(fd) != m_clients.end()) {
             removeClient(epollFd, fd);
@@ -451,7 +464,7 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
 
 void Server::removeClient(int epoll_fd, int client_fd)
 {
-    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
+    removeEpollFd(epoll_fd, client_fd);
     close(client_fd);
     m_clients.erase(client_fd);
 
@@ -599,7 +612,7 @@ bool Server::handleSignalFd(int signalFd, pid_t readerPid, SignalState &signalSt
 void Server::beginDraining(int epollFd, int &listenFd)
 {
     if (listenFd != -1) {
-        epoll_ctl(epollFd, EPOLL_CTL_DEL, listenFd, nullptr);
+        removeEpollFd(epollFd, listenFd);
 
         close(listenFd);
         listenFd = -1;
@@ -625,14 +638,19 @@ bool Server::updateIngressInterest(int epollFd, int listenFd, bool enabled) cons
     for (const auto &[clientFd, client] : m_clients) {
         static_cast<void>(client);
 
-        std::uint32_t clientEvents = static_cast<std::uint32_t>(EPOLLRDHUP | EPOLLERR | EPOLLHUP);
-
         if (enabled) {
-            clientEvents |= static_cast<std::uint32_t>(EPOLLIN);
-        }
-
-        if (!modifyEpollFd(epollFd, clientFd, clientEvents)) {
-            return false;
+            // An open peer may have sent FIN while paused. EPOLL_CTL_ADD
+            // immediately reports unread data (and EOF when reached).
+            if (!addEpollFd(epollFd, clientFd, EPOLLIN | EPOLLRDHUP | EPOLLERR | EPOLLHUP)) {
+                return false;
+            }
+        } else {
+            // EPOLLHUP/EPOLLERR are reported even without EPOLLIN.
+            // Leaving the fd registered can spin epoll_wait() on a
+            // half-closed socket. DEL pauses reads without closing it.
+            if (!removeEpollFd(epollFd, clientFd)) {
+                return false;
+            }
         }
     }
 

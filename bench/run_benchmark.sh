@@ -68,7 +68,12 @@ for ((i=0; i<2400; ++i)); do
     if ! kill -0 "$server_pid" 2>/dev/null; then break; fi
     sleep 0.05
 done
-[[ "$persisted" == true ]] || { echo "Frames not fully written" >&2; exit 1; }
+if [[ "$persisted" != true ]]; then
+    bytes=0
+    if [[ -f "$data" ]]; then bytes=$(stat -c '%s' "$data"); fi
+    echo "Frames not fully written: expected=$expected bytes, actual=$bytes bytes" >&2
+    exit 1
+fi
 
 kill -TERM "$server_pid"
 stopped=false

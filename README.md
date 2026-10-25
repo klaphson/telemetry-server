@@ -327,9 +327,11 @@ quotes, as in the two-frame example. Use `>&3` to write to the open connection.
   frames, so resumption can wait until the ring is empty.
 - The shared ring holds at most 4 MiB of pending frame data. An enqueue that would
   exceed this hard limit fails and stops the server with an error.
-- Disconnect events close clients even while ingress reads are paused. A client
-  that closes or half-closes during a pause can lose unread frames buffered in
-  its socket or client input buffer.
+- While ingress is paused, client sockets are temporarily removed from epoll,
+  but stay open. This avoids repeated hangup events and preserves unread TCP
+  bytes if a sender closes its write side. On resume, clients are registered
+  again, and the server reads remaining data before honoring EOF. An explicit
+  shutdown still closes clients and may discard unqueued TCP data.
 
 ## Binary telemetry codec
 
@@ -494,7 +496,8 @@ Catch2 unit tests cover:
   frames across a pause, stopping before the next receive, shutdown, and error
   propagation, using a shared ring, eventfds, and nonblocking socket pairs.
   Tests also check batched data-ready notifications, incomplete TCP frames,
-  valid frames before protocol errors, and eventfd error handling.
+  valid frames before protocol errors, buffered frames on half-closed clients
+  during backpressure, and eventfd error handling.
 - Server signals: empty input, repeated shutdown requests, reader termination
   while running or draining, nonterminal reader events, unrelated signals and
   child PIDs, batched notifications, and reader-failure precedence over shutdown.
@@ -534,7 +537,7 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 50 tests: 48 Catch2 cases (including 11 configuration
+The suite currently has 53 tests: 51 Catch2 cases (including 12 configuration
 cases and seven signal cases) and two process integration tests.
 Coverage gaps include merged child-state notifications, unexpected parent death,
 and unread-frame preservation during paused disconnects.

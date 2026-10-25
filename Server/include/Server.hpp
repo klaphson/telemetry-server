@@ -59,6 +59,7 @@ class Server
     // Event handling
     bool addEpollFd(int epollFd, int fd, std::uint32_t events) const;
     bool modifyEpollFd(int epoll_fd, int fd, std::uint32_t events) const;
+    bool removeEpollFd(int epollFd, int fd) const;
 
     // Returns false only when the event requires stopping the server.
     bool handleEvent(const epoll_event &event, int epollFd, int listenFd, SharedRingBuffer &ring,
