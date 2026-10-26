@@ -51,6 +51,14 @@ if(TELEMETRY_BUILD_BENCHMARKS)
 endif()
 
 if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME telemetry_benchmark_harness
+            COMMAND "${Python3_EXECUTABLE}" -m unittest discover
+                -s "${CMAKE_CURRENT_SOURCE_DIR}/bench" -p "test_*.py")
+        set_tests_properties(telemetry_benchmark_harness PROPERTIES TIMEOUT 15)
+    endif()
+
     add_test(NAME telemetry_process_smoke
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/process_smoke.sh" $<TARGET_FILE:telemetry-server>)
     add_test(NAME telemetry_graceful_shutdown

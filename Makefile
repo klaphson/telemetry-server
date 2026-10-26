@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -23,10 +23,18 @@ run-service: build
 test: build
 	ctest --test-dir build --output-on-failure
 
-benchmark:
+benchmark-build:
 	cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTELEMETRY_BUILD_BENCHMARKS=ON
 	cmake --build build-bench
+
+benchmark: benchmark-build
 	bash bench/run_benchmark.sh
+
+benchmark-matrix: benchmark-build
+	bash bench/run_benchmark.sh 500000 128 19000 --batches 1,32,128,512 --repeat 3
+
+benchmark-test:
+	python3 -m unittest discover -s bench -p 'test_*.py'
 
 clean:
 	rm -rf build

@@ -537,8 +537,9 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The suite currently has 53 tests: 51 Catch2 cases (including 12 configuration
-cases and seven signal cases) and two process integration tests.
+The C++ suite has 53 tests: 51 Catch2 cases (including 12 configuration
+cases and seven signal cases) and two process integration tests. The optional
+Python benchmark harness adds five more unit tests.
 Coverage gaps include merged child-state notifications, unexpected parent death,
 and unread-frame preservation during paused disconnects.
 
@@ -708,40 +709,55 @@ stop the service, repeat the executable installation command, and start it with
 
 ## TCP end-to-end benchmark
 
-The optional benchmark uses the existing `Protocol::encode()` to create valid
-32-byte frames and sends them through loopback TCP. It measures the sender time
-separately from the full pipeline, waits for the expected output size, terminates
-the server through SIGTERM and verifies the Reader's clean EOF.
+The optional benchmark generates 32-byte telemetry frames using the existing
+`Protocol::encode()` and sends them through loopback TCP. After storage and
+graceful shutdown, it checks **every record**, including magic, version, size,
+sensor, metric, sequential timestamp and value. Verification occurs after
+the measured interval, so it does not inflate the throughput timing.
 
-Inside the Linux dev container:
+The Linux runner uses `inotify` for file-change notifications and `pidfd`
+(if available) to detect process exit. Unlike the previous shell loop,
+the measured interval has no fixed 50 ms polling sleeps. Startup occurs before
+the timed interval; the end-to-end measurement includes sender startup,
+TCP, Server/Reader processing, shutdown and final synchronization.
+
+Build Release binaries and run the default experiment:
 
 ```bash
 make benchmark
 ```
 
-For a custom run after the release binaries are built:
+Run one custom experiment using the existing arguments (frames, batch, port):
 
 ```bash
-bash bench/run_benchmark.sh 200000 128 19000
+bash bench/run_benchmark.sh 500000 128 19000
 ```
 
-Arguments are frame count, frames per TCP send batch, and port. Defaults are
-100,000 frames, 128 per batch, and port 19000. The workload is limited to
-1,000,000 frames (32 MiB) to avoid triggering the default 64 MiB segment
-rotation. Benchmark output files are created in a temporary directory and
-removed on exit. Do not use a port already occupied by another server.
+To run three repeats for each batch size and export the individual results:
 
-`sender_frames_per_second` only measures the time it takes to send the bytes
-to TCP. `end_to_end_frames_per_second` includes sending, writing the entire
-output file, graceful shutdown and final sync. The script checks byte count and
-Reader EOF, but not the content of every stored frame.
+```bash
+bash bench/run_benchmark.sh 500000 128 19000 \
+  --batches 1,32,128,512 --repeat 3 \
+  --csv build-bench/benchmark_results.csv
+```
 
-The `--quiet` server option silences per-record logging so formatting terminal
-messages does not dominate the result. Lifecycle and error messages remain.
-This measures the entire pipeline, not shared-memory IPC alone. Repeat tests
-under comparable load and report a median instead of a single number.
-Docker Desktop adds Linux VM overhead. For syscall counts, run a separate
-`strace -f -c` experiment: tracing itself affects throughput.
+Or use `make benchmark-matrix`. After every batch, the runner prints
+median, minimum and maximum throughput across that batch's repeated runs.
+The CSV stores one row per completed run; it is overwritten when another
+invocation uses the same path. Build output and results under `build-bench/`
+are Git-ignored. The run limit is 1,000,000 frames (32 MB), under the
+default segment rotation threshold.
+
+The `--quiet` option disables per-record stdout logging, not errors or
+lifecycle logs. The script checks persisted frame contents and Reader EOF.
+`sender_frames_per_second` measures delivery into TCP, whereas
+`end_to_end_frames_per_second` measures the whole pipeline and shutdown.
+The tests depend on standard-library Python 3 and Linux inotify; no extra
+Python packages are necessary.
+
+Run `make benchmark-test` for Python correctness tests. CTest also includes
+them when Python 3 is available. Repeat measurements under comparable
+host load; Docker Desktop and `strace` introduce measurement overhead.
 
 ## Formatting and Git hooks
 
