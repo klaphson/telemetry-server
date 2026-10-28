@@ -707,6 +707,26 @@ After editing the installed unit, run `sudo systemctl daemon-reload` followed by
 stop the service, repeat the executable installation command, and start it with
 `sudo systemctl start telemetry-server.service`.
 
+## Batched Reader storage writes
+
+The Reader now stages up to **64 KiB (2048 telemetry frames)** and passes
+complete frames to `FileStore::appendFrames()`. Under sustained load, this
+can replace thousands of 32-byte `write()` calls with a few larger writes.
+The Reader also flushes smaller, partially filled batches before waiting on
+`eventfd`, so a slow or stopped sender does not leave data stranded in memory.
+
+`FileStore` splits incoming batches at the configured segment boundary
+and durability threshold. It still rotates only **before** a new frame would
+exceed the segment limit and preserves `fdatasync()` after the configured
+number of bytes (rounded to complete frames). Existing `appendFrame()` calls
+remain supported.
+
+To measure the effect, compare the same workload on the base commit and
+this branch using `make benchmark-matrix` (without `strace`). Then run
+`make profile-syscalls` with tracing to compare the number of Reader
+`write()` calls, not throughput under tracing. Actual batch sizes depend
+on how much data is waiting in the shared ring when Reader drains it.
+
 ## TCP end-to-end benchmark
 
 The optional benchmark generates 32-byte telemetry frames using the existing

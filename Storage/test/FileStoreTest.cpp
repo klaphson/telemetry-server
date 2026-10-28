@@ -7,10 +7,13 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -209,6 +212,97 @@ TEST_CASE("FileStore rotates before a frame would exceed segment size")
     }
 
     REQUIRE(segmentCount == 1);
+}
+
+TEST_CASE("FileStore appends a batch of complete frames in order")
+{
+    using namespace telemetry::protocol;
+
+    TemporaryPath path;
+    const Frame first = encode(TelemetryRecord{1, 2, 11, 1.0});
+    const Frame second = encode(TelemetryRecord{1, 2, 12, 2.0});
+    const Frame third = encode(TelemetryRecord{1, 2, 13, 3.0});
+
+    std::vector<std::byte> batch;
+    for (const auto &frame : {first, second, third}) {
+        batch.insert(batch.end(), frame.begin(), frame.end());
+    }
+
+    {
+        FileStore store;
+        REQUIRE(store.openFile(path.get()));
+        REQUIRE(store.appendFrames(batch));
+        REQUIRE(store.sync());
+    }
+
+    REQUIRE(std::filesystem::file_size(path.get()) == batch.size());
+    std::ifstream file(path.get(), std::ios::binary);
+    const std::string persisted{std::istreambuf_iterator<char>{file},
+                                std::istreambuf_iterator<char>{}};
+    const std::string expected{reinterpret_cast<const char*>(batch.data()), batch.size()};
+    REQUIRE(persisted == expected);
+}
+
+TEST_CASE("FileStore rejects incomplete and empty frame batches")
+{
+    using namespace telemetry::protocol;
+
+    TemporaryPath path;
+    const Frame valid = encode(TelemetryRecord{1, 2, 13, 1.0});
+    FileStore store;
+    REQUIRE_FALSE(store.appendFrames(valid));
+    REQUIRE(store.openFile(path.get()));
+
+    const std::array<std::byte, 31> incomplete{};
+    REQUIRE_FALSE(store.appendFrames({}));
+    REQUIRE_FALSE(store.appendFrames(incomplete));
+    REQUIRE(std::filesystem::file_size(path.get()) == 0);
+
+    REQUIRE(store.appendFrames(valid));
+    REQUIRE(std::filesystem::file_size(path.get()) == kFrameSize);
+}
+
+TEST_CASE("FileStore splits a batch across segment rotations without losing frames")
+{
+    using namespace telemetry::protocol;
+
+    TemporaryDirectory directory;
+    const auto activePath = directory.file("telemetry.bin");
+    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize,
+                                 .syncEveryBytes = kFrameSize};
+
+    std::vector<std::byte> batch;
+    for (std::uint64_t timestamp = 1; timestamp <= 5; ++timestamp) {
+        const Frame frame = encode(TelemetryRecord{1, 2, timestamp, 1.0});
+        batch.insert(batch.end(), frame.begin(), frame.end());
+    }
+
+    {
+        FileStore store{config};
+        REQUIRE(store.openFile(activePath.string()));
+        REQUIRE(store.appendFrames(batch));
+        REQUIRE(store.sync());
+    }
+
+    std::vector<std::filesystem::path> archives;
+    for (const auto &entry : std::filesystem::directory_iterator{directory.path()}) {
+        const std::string name = entry.path().filename().string();
+        if (name.starts_with("telemetry.bin.") && name.ends_with(".segment")) {
+            archives.push_back(entry.path());
+        }
+    }
+    std::sort(archives.begin(), archives.end());
+    REQUIRE(archives.size() == 2);
+
+    const auto readBytes = [](const std::filesystem::path &path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string{std::istreambuf_iterator<char>{stream},
+                           std::istreambuf_iterator<char>{}};
+    };
+    const std::string expected{reinterpret_cast<const char*>(batch.data()), batch.size()};
+    REQUIRE(readBytes(archives[0]) == expected.substr(0, 2 * kFrameSize));
+    REQUIRE(readBytes(archives[1]) == expected.substr(2 * kFrameSize, 2 * kFrameSize));
+    REQUIRE(readBytes(activePath) == expected.substr(4 * kFrameSize));
 }
 
 } // namespace
