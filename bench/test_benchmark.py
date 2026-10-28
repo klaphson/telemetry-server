@@ -1,8 +1,11 @@
 """Unit tests for correctness checks in the performance harness."""
 
 import importlib.util
+import os
 import struct
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -49,6 +52,33 @@ class BenchmarkChecks(unittest.TestCase):
             self.write_frames(file, 1)
             with self.assertRaisesRegex(RuntimeError, "wrong file size"):
                 bench.verify_file(file, 2)
+
+    def test_file_size_wait_falls_back_when_inotify_is_silent(self):
+        # Simulate a host-mounted filesystem that changes a file but never
+        # delivers an inotify event. The watcher is an unreadable pipe.
+        class RunningServer:
+            def poll(self):
+                return None
+
+        with tempfile.TemporaryDirectory() as directory:
+            file = Path(directory) / "telemetry.bin"
+            reader, writer = os.pipe()
+            try:
+                def save_frame():
+                    time.sleep(0.05)
+                    file.write_bytes(b"x" * 32)
+
+                thread = threading.Thread(target=save_frame)
+                thread.start()
+                try:
+                    bench.await_file_size(file, 32, reader, RunningServer(), timeout=2)
+                    self.assertEqual(file.stat().st_size, 32)
+                finally:
+                    thread.join(timeout=2)
+                    self.assertFalse(thread.is_alive())
+            finally:
+                os.close(reader)
+                os.close(writer)
 
     def test_batch_parser_rejects_over_limit(self):
         self.assertEqual(bench.batches("1,32,128,512,128"), [1, 32, 128, 512])

@@ -87,14 +87,16 @@ def await_file_size(path, size, watcher, server, timeout=120):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(f"frames not fully written: expected={size}, actual={actual} bytes")
-        readable, _, _ = select.select([watcher], [], [], remaining)
-        if not readable:
-            raise TimeoutError(f"frames not fully written: expected={size}, actual={actual} bytes")
-        # A single read is enough to clear an event and check the file again.
-        try:
-            os.read(watcher, 65536)
-        except BlockingIOError:
-            pass
+        # inotify notifications may not be forwarded reliably by host-mounted
+        # filesystems (e.g. Docker Desktop VirtioFS). Poll the actual file
+        # size at most every 100 ms even without an event. When inotify works,
+        # it still wakes this loop immediately.
+        readable, _, _ = select.select([watcher], [], [], min(remaining, 0.1))
+        if readable:
+            try:
+                os.read(watcher, 65536)
+            except BlockingIOError:
+                pass
 
 
 def await_exit(proc, timeout=20):

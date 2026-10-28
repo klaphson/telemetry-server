@@ -716,8 +716,11 @@ sensor, metric, sequential timestamp and value. Verification occurs after
 the measured interval, so it does not inflate the throughput timing.
 
 The Linux runner uses `inotify` for file-change notifications and `pidfd`
-(if available) to detect process exit. Unlike the previous shell loop,
-the measured interval has no fixed 50 ms polling sleeps. Startup occurs before
+(if available) to detect process exit. It also checks the file size at least
+every 100 ms because Docker Desktop host-mounted filesystems may fail to
+deliver inotify notifications. When notifications work, no polling delay
+is added. Unlike the previous shell loop, there is no mandatory 50 ms sleep
+after each notification. Startup occurs before
 the timed interval; the end-to-end measurement includes sender startup,
 TCP, Server/Reader processing, shutdown and final synchronization.
 
@@ -758,6 +761,85 @@ Python packages are necessary.
 Run `make benchmark-test` for Python correctness tests. CTest also includes
 them when Python 3 is available. Repeat measurements under comparable
 host load; Docker Desktop and `strace` introduce measurement overhead.
+
+## Profiling system calls with strace
+
+The syscall profiler answers **which syscalls the Server and Reader perform
+and how often**. It traces the parent and its forked child separately, without
+changing the C++ application:
+
+```bash
+make profile-syscalls
+```
+
+The target builds the same Release binaries as the benchmark and runs a
+**10,000-frame** workload (default batch 128 on TCP port 19000). A small workload
+keeps detailed per-process traces manageable. Customize it:
+
+```bash
+python3 bench/profile_syscalls.py --frames 20000 --batch 128 \
+  --port 19000 --output build-bench/syscall-profile
+```
+
+The profiler starts Server and Reader normally, **then attaches strace**
+to both process PIDs before sending data. This avoids tracing the initial
+fork and makes it easier to diagnose whether tracing changes startup
+behavior. The flags `-ff -T -s 0 -yy` write separate `trace.<PID>`
+files for Server and Reader; `-T` adds elapsed wall time to each
+completed syscall. The summary includes per-process call and error counts,
+saved to `syscalls.csv`. The profiler also checks the original order
+and exact contents of persisted frames.
+
+For reliable file notifications inside Docker Desktop, the profiler writes
+temporary telemetry data to a native Linux directory under `/tmp` instead
+of the host-mounted `/workspace`. It removes those temporary telemetry bytes
+when finished, but **retains** `trace.<PID>`, `server.log`, `strace.log`
+and `syscalls.csv` under `build-bench/syscall-profile/`. This means
+syscall counts remain useful, but storage latency is not directly comparable
+to benchmark runs using a different filesystem.
+
+The script prints each PID, confirms successful attachment to **both**
+processes and displays the trace directory. `--timeout 90` allows a
+longer storage wait for slow hosts. An unsuccessful run keeps raw trace files
+and shows the most recent syscalls, process states and strace messages
+directly in the terminal, so failures are easier to debug.
+
+Outputs:
+
+```text
+build-bench/syscall-profile/server.log
+build-bench/syscall-profile/strace.log
+build-bench/syscall-profile/trace.<server PID>
+build-bench/syscall-profile/trace.<reader PID>
+build-bench/syscall-profile/syscalls.csv
+```
+
+Read the results by comparing **call counts**: for example,
+`Reader write` calls should approach the number of stored frames
+(because `FileStore::appendFrame()` currently calls `write()` for
+every 32-byte frame), while Server `recvfrom` calls correspond
+to socket reads. `read` also includes eventfd/signalfd activity,
+and `write` can include lifecycle logs; inspect the trace's file
+descriptor paths (`-yy`) when in doubt.
+
+**Do not interpret `elapsed_seconds` as CPU time.**
+`-T` measures wall time inside a syscall, so blocking
+`epoll_wait()` or `eventfd_read()` may appear
+expensive even when the process is sleeping. `strace` perturbs
+scheduling and performance, so never compare throughput under strace with
+the normal benchmark. Use `perf` later for CPU hotspots.
+
+The Ubuntu devcontainer's Dockerfile includes `strace`, and Compose
+adds `SYS_PTRACE` and `seccomp=unconfined`. If
+`strace` reports `Operation not permitted`,
+rebuild/recreate the development container with the current Compose
+configuration. Do not grant tracing privileges to the production service.
+
+Unit-test the profiler's parser with:
+
+```bash
+make benchmark-test
+```
 
 ## Formatting and Git hooks
 

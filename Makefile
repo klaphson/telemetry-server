@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test profile-syscalls format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -35,6 +35,9 @@ benchmark-matrix: benchmark-build
 
 benchmark-test:
 	python3 -m unittest discover -s bench -p 'test_*.py'
+
+profile-syscalls: benchmark-build
+	python3 bench/profile_syscalls.py --frames 10000 --batch 128 --port 19000
 
 clean:
 	rm -rf build
