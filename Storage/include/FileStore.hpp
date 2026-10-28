@@ -35,6 +35,11 @@ class FileStore
     [[nodiscard]]
     bool appendFrame(std::span<const std::byte> frame);
 
+    // Accept one or more complete 32-byte frames. Split writes at the
+    // configured segment boundary and durability interval.
+    [[nodiscard]]
+    bool appendFrames(std::span<const std::byte> frames);
+
     [[nodiscard]]
     bool sync();
 

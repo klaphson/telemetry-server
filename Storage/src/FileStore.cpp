@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <filesystem>
@@ -51,51 +52,77 @@ bool FileStore::openFile(std::string_view path)
 
 bool FileStore::appendFrame(std::span<const std::byte> frame)
 {
+    return appendFrames(frame);
+}
+
+bool FileStore::appendFrames(std::span<const std::byte> frames)
+{
     using telemetry::protocol::kFrameSize;
 
     if (m_fd == -1) {
         return false;
     }
 
-    if (frame.size() != kFrameSize) {
-        std::cerr << "[storage] invalid frame size=" << frame.size() << '\n';
-
+    if (frames.empty() || frames.size() % kFrameSize != 0) {
+        std::cerr << "[storage] invalid frame batch size=" << frames.size() << '\n';
         return false;
-    }
-
-    if (m_currentSize > m_config.maxSegmentBytes - frame.size()) {
-
-        if (!rotate()) {
-            return false;
-        }
     }
 
     std::size_t offset = 0;
-
-    while (offset < frame.size()) {
-        const ssize_t written = write(m_fd, frame.data() + offset, frame.size() - offset);
-
-        if (written > 0) {
-            offset += static_cast<std::size_t>(written);
-
-            continue;
+    while (offset < frames.size()) {
+        // A full segment remains active until another frame is appended.
+        // Rotate before writing the first frame that exceeds the limit.
+        if (m_currentSize >= m_config.maxSegmentBytes) {
+            if (!rotate()) {
+                return false;
+            }
         }
 
-        if (written == -1 && errno == EINTR) {
-            continue;
+        const std::size_t remainingSegmentBytes = m_config.maxSegmentBytes - m_currentSize;
+        std::size_t chunkBytes =
+            std::min(frames.size() - offset, remainingSegmentBytes);
+
+        // Preserve the original frame-level fdatasync cadence. The threshold
+        // may be unaligned, so round up to the next complete frame.
+        if (m_config.syncEveryBytes != 0) {
+            if (m_unsyncedBytes >= m_config.syncEveryBytes) {
+                if (!sync()) {
+                    return false;
+                }
+            }
+            const std::size_t untilSync = m_config.syncEveryBytes - m_unsyncedBytes;
+            if (untilSync < chunkBytes) {
+                const std::size_t framesUntilSync = 1 + (untilSync - 1) / kFrameSize;
+                chunkBytes = framesUntilSync * kFrameSize;
+            }
         }
 
-        perror("write telemetry file");
-        return false;
-    }
+        std::size_t writtenBytes = 0;
+        while (writtenBytes < chunkBytes) {
+            const ssize_t written =
+                write(m_fd, frames.data() + offset + writtenBytes, chunkBytes - writtenBytes);
 
-    m_currentSize += frame.size();
-    m_unsyncedBytes += frame.size();
+            if (written > 0) {
+                writtenBytes += static_cast<std::size_t>(written);
+                continue;
+            }
+            if (written == -1 && errno == EINTR) {
+                continue;
+            }
 
-    if (m_config.syncEveryBytes != 0 && m_unsyncedBytes >= m_config.syncEveryBytes) {
-
-        if (!sync()) {
+            perror("write telemetry file");
             return false;
+        }
+
+        offset += chunkBytes;
+        m_currentSize += chunkBytes;
+        m_unsyncedBytes += chunkBytes;
+
+        if (m_config.syncEveryBytes != 0 &&
+            m_unsyncedBytes >= m_config.syncEveryBytes) {
+            if (!sync()) {
+                return false;
+            }
         }
     }
 
