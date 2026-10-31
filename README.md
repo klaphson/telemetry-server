@@ -834,11 +834,11 @@ build-bench/syscall-profile/trace.<reader PID>
 build-bench/syscall-profile/syscalls.csv
 ```
 
-Read the results by comparing **call counts**: for example,
-`Reader write` calls should approach the number of stored frames
-(because `FileStore::appendFrame()` currently calls `write()` for
-every 32-byte frame), while Server `recvfrom` calls correspond
-to socket reads. `read` also includes eventfd/signalfd activity,
+Read the results by comparing **call counts**: after the 64 KiB
+Reader batching optimization, Reader `write` calls should be far fewer
+than the number of stored frames. The exact count depends on occupancy
+of the shared ring, rotation and sync boundaries. Server `recvfrom`
+calls correspond to socket reads. `read` also includes eventfd/signalfd activity,
 and `write` can include lifecycle logs; inspect the trace's file
 descriptor paths (`-yy`) when in doubt.
 
@@ -860,6 +860,136 @@ Unit-test the profiler's parser with:
 ```bash
 make benchmark-test
 ```
+
+## CPU profiling with a separate C++20 controller and Linux perf
+
+**Profiling** means measuring where a running program spends CPU time,
+rather than only how long the whole workload takes. Unlike `strace`,
+which counts Linux system calls, `perf record` samples executing code
+and can identify expensive C++ functions.
+
+`bench/profile_cpu.cpp` executable controls the standard Linux
+`perf` tool. It does **not** insert timers or instrumentation into
+Server, Reader or FileStore, and it is **not** linked into
+`telemetry-server`.
+
+The profiler uses **temporary native Linux copies** of the Server and sender binaries,
+which avoids symbol-resolution failures observed on Docker Desktop VirtioFS.
+The original build files and production code stay unchanged. The copies are
+removed after profiling; `perf buildid-cache` keeps symbols for later review.
+
+The sequence is:
+
+```text
+telemetry-profile-cpu (C++20 controller)
+    |
+    +-- perf record (sample CPU)
+          |
+          +-- python3 bench/run_benchmark.py (existing workload only)
+                |
+                +-- telemetry-load (TCP sender)
+                +-- telemetry-server (parent)
+                      +-- Reader (forked child)
+    |
+    +-- validate the existing benchmark's CSV results
+    +-- perf report --stdio (CPU hotspots by PID and symbol)
+```
+
+The Python script above is **only the existing benchmark and data
+verification harness**. The new profiler orchestration, process
+spawning, timeouts and report validation are C++20. The controller uses
+`posix_spawnp()` to start tools, `waitpid()` to monitor them,
+a separate process group to terminate timed-out workloads, and C++20
+`std::filesystem`, `std::chrono`, and `std::from_chars`.
+
+`perf record` inherits profiling for child processes by default.
+That includes Server and Reader. Its report is separated by
+**PID (process identifier)**, library and function name. The recording also includes the sender and Python benchmark, but the
+**hotspot report filters to `telemetry-serve`** (Linux's 15-character process
+name for `telemetry-server`) and aggregates samples across benchmark runs.
+The percentages are relative to the filtered Server and Reader CPU samples,
+not to wall time. Counter mode (`--mode stat`) still measures the entire
+process tree, including Python.
+
+To compile and run a test that requires no `perf` permissions:
+
+```bash
+make profile-cpu-test
+```
+
+The development image includes `linux-tools-generic` and exposes its actual
+`perf` binary in `/usr/local/bin`. Rebuild the devcontainer after updating
+the Dockerfile. To repair an existing Ubuntu development container without
+rebuilding, run as root:
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends linux-tools-generic
+perf_bin="$(find /usr/lib/linux-tools -name perf -print | sort -V | tail -n 1)"
+test -x "$perf_bin" && ln -s "$perf_bin" /usr/local/bin/perf
+perf --version
+```
+
+Ubuntu's `/usr/bin/perf` launcher selects tools using the running kernel's
+version. Docker Desktop uses a LinuxKit kernel, so that launcher can report
+`perf not found for kernel ...` even after installation. The symlink above
+bypasses the launcher; the sampling check below verifies whether the
+packaged binary works with the host kernel. Alternatively, pass the actual
+binary path with `telemetry-profile-cpu --perf /path/to/perf --check`.
+
+Then check whether the kernel permits sampling:
+
+```bash
+make profile-cpu-check
+```
+
+If it prints `perf sampling check: OK`, capture CPU samples:
+
+```bash
+make profile-cpu
+```
+
+The default run records 20 verified workloads of 1,000,000 frames each,
+with TCP batch size 128. Custom command:
+
+```bash
+./build-perf/telemetry-profile-cpu --frames 500000 --batch 128 --repeat 5
+./build-perf/telemetry-profile-cpu --mode stat --frames 1000000 --repeat 10
+./build-perf/telemetry-profile-cpu --help
+```
+
+The separate `build-perf/` CMake build uses Release optimizations and
+adds `-g -fno-omit-frame-pointer` so `perf` can resolve function
+names and stack frames. This does not change the normal Release build.
+
+Files are written into `build-perf/cpu-profile/`:
+
+- `perf.data`: binary sample recording
+- `report.txt`: filtered, relative CPU hotspot report grouped by DSO and C++ symbol (with sample counts)
+- `record.log`: output from the benchmark wrapped by `perf`
+- `record_runs.csv`: fully validated benchmark runs
+- `check.log`: kernel permission-check diagnostics
+- `telemetry-server-buildid.log` and `telemetry-load-buildid.log`: symbol cache diagnostics
+- `stat.txt`, `stat_runs.csv`: optional CPU counters in `--mode stat`
+
+**Important limitations:** `perf` is an external Linux tool, not
+implemented from scratch in C++. Linux `perf_event_open()` may be
+blocked by the kernel used by Docker Desktop even for root; this is
+not solved by changing the programming language. Install the
+kernel-matched `perf` / `linux-tools` package on native Linux if
+needed. Do **not** grant extra privileges to a production service
+to make development profiling work.
+
+Samples are statistical, not exact per-function timings. The profiler
+rejects reports without named telemetry-server functions; if this happens,
+inspect `report.txt` and `perf buildid-list -i build-perf/cpu-profile/perf.data`.
+For more detailed investigation, inspect the raw file using `perf report`.
+A separate CPU profile recorded over the whole tree can include Python, but
+the generated `report.txt` filters it out.
+Profiling can
+change scheduling; use `make benchmark-matrix` rather than `perf` for
+throughput comparisons. `--mode both` performs two **separate**
+workloads for sampling and counters.
 
 ## Formatting and Git hooks
 
