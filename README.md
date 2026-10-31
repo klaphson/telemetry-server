@@ -957,8 +957,6 @@ change scheduling; use `make benchmark-matrix` rather than `perf` for
 throughput comparisons. `--mode both` performs two **separate**
 workloads for sampling and counters.
 
-See [ROADMAP.md](ROADMAP.md) for the planned project stages.
-
 ## Formatting and Git hooks
 
 C++ formatting uses clang-format 18 and the repository's `.clang-format`.
