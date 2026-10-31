@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ninja-build \
     gdb \
     strace \
+    linux-tools-generic \
     lsof \
     procps \
     iproute2 \
@@ -22,6 +23,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+# Use the packaged binary directly: Docker Desktop's LinuxKit kernel has no
+# matching Ubuntu tools package for the /usr/bin/perf launcher to select.
+RUN perf_bin="$(find /usr/lib/linux-tools -name perf -print | sort -V | tail -n 1)" \
+    && test -x "$perf_bin" \
+    && ln -s "$perf_bin" /usr/local/bin/perf \
+    && perf --version
 
 RUN groupadd --system telemetry \
     && useradd \
