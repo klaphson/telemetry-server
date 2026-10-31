@@ -7,11 +7,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TELEMETRY_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(TELEMETRY_BUILD_BENCHMARKS "Build load generator" OFF)
+option(TELEMETRY_PROFILE_CPU "Keep debug symbols and frame pointers in optimized builds for perf" OFF)
 
 add_library(telemetry_build_options INTERFACE)
 target_compile_options(telemetry_build_options INTERFACE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
+if(TELEMETRY_PROFILE_CPU)
+    target_compile_options(telemetry_build_options INTERFACE -g -fno-omit-frame-pointer)
+endif()
 if(TELEMETRY_ENABLE_SANITIZERS)
     target_compile_options(telemetry_build_options INTERFACE
         -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -48,9 +52,18 @@ target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetr
 if(TELEMETRY_BUILD_BENCHMARKS)
     add_executable(telemetry-load bench/telemetry_load.cpp)
     target_link_libraries(telemetry-load PRIVATE Protocol telemetry_build_options)
+
+    # Development-only CLI tool: does not link into telemetry-server.
+    add_executable(telemetry-profile-cpu bench/profile_cpu.cpp)
+    target_link_libraries(telemetry-profile-cpu PRIVATE telemetry_build_options)
 endif()
 
 if(BUILD_TESTING)
+    if(TELEMETRY_BUILD_BENCHMARKS)
+        add_test(NAME telemetry_cpp_cpu_profiler_selftest
+            COMMAND $<TARGET_FILE:telemetry-profile-cpu> --self-test)
+    endif()
+
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
         add_test(NAME telemetry_benchmark_harness
