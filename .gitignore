@@ -1,5 +1,6 @@
 build/
 build-bench/
+build-perf/
 cmake-build-*/
 .vscode/
 .idea/

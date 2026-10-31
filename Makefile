@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test profile-syscalls format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -38,6 +38,16 @@ benchmark-test:
 
 profile-syscalls: benchmark-build
 	python3 bench/profile_syscalls.py --frames 10000 --batch 128 --port 19000
+
+profile-cpu-build:
+	cmake -S . -B build-perf -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTELEMETRY_BUILD_BENCHMARKS=ON -DTELEMETRY_PROFILE_CPU=ON
+	cmake --build build-perf
+
+profile-cpu-check:
+	python3 bench/profile_cpu.py --check
+
+profile-cpu: profile-cpu-build
+	python3 bench/profile_cpu.py --frames 1000000 --batch 128 --repeat 15
 
 clean:
 	rm -rf build

@@ -834,11 +834,11 @@ build-bench/syscall-profile/trace.<reader PID>
 build-bench/syscall-profile/syscalls.csv
 ```
 
-Read the results by comparing **call counts**: for example,
-`Reader write` calls should approach the number of stored frames
-(because `FileStore::appendFrame()` currently calls `write()` for
-every 32-byte frame), while Server `recvfrom` calls correspond
-to socket reads. `read` also includes eventfd/signalfd activity,
+Read the results by comparing **call counts**: after the 64 KiB
+Reader batching optimization, Reader `write` calls should be far fewer
+than the number of stored frames. The exact count depends on occupancy
+of the shared ring, rotation and sync boundaries. Server `recvfrom`
+calls correspond to socket reads. `read` also includes eventfd/signalfd activity,
 and `write` can include lifecycle logs; inspect the trace's file
 descriptor paths (`-yy`) when in doubt.
 
@@ -860,6 +860,69 @@ Unit-test the profiler's parser with:
 ```bash
 make benchmark-test
 ```
+
+## CPU hotspot profiling with perf
+
+The next stage after batched storage writes is to identify CPU-heavy C++
+functions rather than guessing which loop to optimize. Profiling uses a
+separate **Release** build with debug symbols and frame pointers so perf can
+resolve function names and call stacks. This is an optimized build, not a
+Debug build. It does not change ordinary Release binaries.
+
+First check whether the Linux kernel permits CPU sampling:
+
+```bash
+make profile-cpu-check
+```
+
+If this succeeds, build and collect a profile:
+
+```bash
+make profile-cpu
+```
+
+The harness runs the verified loopback benchmark **15 times with 1,000,000
+frames and a batch size of 128**, collecting CPU-clock samples inherited by
+child processes (including Server and forked Reader). It uses a user-space
+software event, `cpu-clock:u`, and frame-pointer call graphs. The sample
+frequency is 499 Hz. This includes Python and the load generator too: filter
+or inspect process IDs and `telemetry-server` symbols in the report.
+
+Outputs are under `build-perf/cpu-profile/`:
+
+```text
+perf.data           binary samples (read with perf)
+report.txt          text report sorted by PID, library and symbol
+record.log          profiler and benchmark run log
+record_runs.csv     all verified benchmark runs
+check.log           permission check diagnostics
+```
+
+For a shorter run, or CPU software counters instead of call-graph samples:
+
+```bash
+python3 bench/profile_cpu.py --frames 500000 --repeat 5
+python3 bench/profile_cpu.py --frames 1000000 --repeat 10 --mode stat
+```
+
+The `--mode both` option runs separate sampling and counter workloads;
+the measurements are therefore not from one single run. Inspect a full
+profile with `perf report --stdio -i build-perf/cpu-profile/perf.data`.
+The report uses `--sort pid,dso,symbol`, so Server and Reader can be
+distinguished by PID. The binary is built with
+`-g -fno-omit-frame-pointer`, while keeping Release optimization.
+
+**Docker Desktop warning:** Linux `perf_event_open` may be blocked or
+unsupported by the VM kernel even for root. `SYS_PTRACE` used by strace
+does not guarantee access to perf. The check command reports this
+explicitly; do not make the production container privileged just to
+capture a development profile. Prefer native Ubuntu/Linux when Docker
+Desktop blocks sampling. On native Ubuntu install a matching
+`linux-tools` / `linux-tools-common` package and check `uname -r`
+and `perf --version`. Perf results are diagnostic, not an unprofiled
+throughput measurement; compare throughput using `make benchmark-matrix`.
+
+The project-wide development plan is recorded in [ROADMAP.md](ROADMAP.md).
 
 ## Formatting and Git hooks
 
