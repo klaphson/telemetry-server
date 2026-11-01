@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -35,6 +35,10 @@ benchmark-matrix: benchmark-build
 
 benchmark-test:
 	python3 -m unittest discover -s bench -p 'test_*.py'
+
+benchmark-ipc: benchmark-build
+	mkdir -p build-ipc-results
+	bash bench/run_benchmark.sh 1000000 128 19000 --repeat 5 --csv build-ipc-results/batched.csv
 
 profile-syscalls: benchmark-build
 	python3 bench/profile_syscalls.py --frames 10000 --batch 128 --port 19000

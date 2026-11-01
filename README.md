@@ -861,6 +861,43 @@ Unit-test the profiler's parser with:
 make benchmark-test
 ```
 
+## IPC batching: default and only production path
+
+Server and Reader always use batched SPSC ring transfers. The Server
+validates complete TCP frames and publishes the valid prefix using
+`tryPushBatch()`; the Reader retrieves up to 4 KiB at a time through
+`tryPopBatch()`, then stages up to 64 KiB for file writes. A batch
+returns its actual number of frames, which may be smaller than requested.
+
+Batch methods copy at most two contiguous ranges across the wrap boundary
+and publish or release the entire batch through a single atomic
+`memory_order_release` store. The opposite process reads the index with
+`memory_order_acquire`. This ring is strictly single-producer,
+single-consumer (SPSC).
+
+The low-level single-frame `tryPush()` and `tryPop()` API remains
+available for unit tests, but production Server and Reader do not select
+a scalar mode. There is no CMake option for scalar IPC.
+
+The original five-run comparison measured medians of **14.60 million
+frames/s** for batched IPC and **11.11 million frames/s** for scalar IPC.
+Two further five-run measurements with the simplified, batched-only
+version reached medians of **14.09** and **13.83 million frames/s**.
+All 20 runs verified the persisted frame count and ordering. Performance
+varies with host load and scheduling; these results are not guarantees.
+
+Run a batched-only repeatable benchmark:
+
+```bash
+make benchmark-ipc
+```
+
+The output is saved in `build-ipc-results/batched.csv`. Existing
+`make benchmark-matrix` remains available for TCP sender batch-size
+comparisons. Tests cover partial batches, wraparound, full ring,
+single-frame API interoperation and forked SPSC ordering, including
+Server rejection of a full ring and notification after partial publication.
+
 ## CPU profiling with a separate C++20 controller and Linux perf
 
 **Profiling** means measuring where a running program spends CPU time,

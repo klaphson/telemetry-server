@@ -14,10 +14,12 @@
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -376,48 +378,68 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
                 return true;
             }
 
-            while (client.inputBuffer.pendingBytes() >= kFrameSize) {
+            // Validate every complete frame before publishing its contiguous
+            // prefix. Never put the malformed frame into shared memory.
+            const std::size_t availableFrames = client.inputBuffer.pendingBytes() / kFrameSize;
+            std::size_t validFrames = 0;
+            DecodeError invalidError = DecodeError::None;
 
+            for (std::size_t index = 0; index < availableFrames; ++index) {
                 const std::span<const std::byte> frame{
-                    client.inputBuffer.data.data() + client.inputBuffer.offset, kFrameSize};
-
+                    client.inputBuffer.data.data() + client.inputBuffer.offset +
+                        index * kFrameSize,
+                    kFrameSize};
                 const DecodeResult decoded = decode(frame);
 
                 if (!decoded) {
-                    std::cerr << "[server] client fd=" << clientFd
-                              << " protocol error: " << toString(decoded.error) << '\n';
-
-                    // Even if this frame is invalid, earlier valid frames
-                    // from this recv() still need to wake the reader.
-                    if (!notifyPublished()) {
-                        return false;
-                    }
-
-                    removeClient(epollFd, clientFd);
-
-                    return true;
+                    invalidError = decoded.error;
+                    break;
                 }
 
                 const TelemetryRecord &record = decoded.record;
-
                 if (!m_config.quiet) {
                     std::cout << "[server] fd=" << clientFd << " sensor=" << record.sensorId
                               << " metric=" << record.metricId
                               << " timestamp_ns=" << record.timestampNs << " value=" << record.value
                               << '\n';
                 }
+                ++validFrames;
+            }
 
-                if (!enqueueFrame(ring, frame)) {
-                    // The parent will notify the reader when shutting down.
+            if (validFrames != 0) {
+                const std::span<const std::byte> validBytes{
+                    client.inputBuffer.data.data() + client.inputBuffer.offset,
+                    validFrames * kFrameSize};
+                const std::size_t pushed = ring.tryPushBatch(validBytes);
+                client.inputBuffer.offset += pushed * kFrameSize;
+                publishedAny = pushed != 0;
+
+                if (pushed != validFrames) {
+                    // Existing ingress thresholds leave 1 MiB of headroom.
+                    // An unexpectedly full ring is still a fatal error, not
+                    // silent data loss. Wake the reader for any accepted prefix.
+                    if (!notifyPublished()) {
+                        return false;
+                    }
+                    std::cerr << "[server] shared ring full or unavailable\n";
                     return false;
                 }
-
-                publishedAny = true;
-                client.inputBuffer.offset += kFrameSize;
 
                 if (ring.pendingBytes() >= kPauseIngressBytes) {
                     pauseIngressRequested = true;
                 }
+            }
+
+            if (invalidError != DecodeError::None) {
+                // Publish the preceding valid frames before rejecting this
+                // client, preserving already accepted frames.
+                if (!notifyPublished()) {
+                    return false;
+                }
+                std::cerr << "[server] client fd=" << clientFd
+                          << " protocol error: " << toString(invalidError) << '\n';
+                removeClient(epollFd, clientFd);
+                return true;
             }
 
             // Wake the reader after publishing all frames from this recv().
@@ -478,16 +500,6 @@ void Server::removeAllClients(int epollFd)
 
         removeClient(epollFd, clientFd);
     }
-}
-
-bool Server::enqueueFrame(SharedRingBuffer &ring, std::span<const std::byte> frame) const
-{
-    if (!ring.tryPush(frame)) {
-        std::cerr << "[server] shared ring full or unavailable\n";
-        return false;
-    }
-
-    return true;
 }
 
 bool Server::handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
