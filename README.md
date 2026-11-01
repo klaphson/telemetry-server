@@ -861,6 +861,55 @@ Unit-test the profiler's parser with:
 make benchmark-test
 ```
 
+## IPC batching: a measured C++20 SPSC experiment
+
+The 4 MiB shared-memory ring supports two APIs:
+
+- `tryPush()` / `tryPop()`: transfer one 32-byte frame and publish one
+  atomic `head` / `tail` update per frame (baseline).
+- `tryPushBatch()` / `tryPopBatch()`: transfer as many **complete**
+  frames as are currently available or fit in the ring; return the
+  **number of frames transferred**, potentially fewer than requested.
+  A nonempty, 32-byte-aligned-by-length span is required.
+
+The batch methods copy up to two contiguous ranges when the circular
+buffer wraps and publish/release the entire batch with one
+`memory_order_release` store. The other process reads the counter
+with `memory_order_acquire`. A producer cannot overwrite a frame
+until the consumer has copied it out. The ring is **single-producer,
+single-consumer only**; using it with multiple producers or consumers
+would be unsafe without redesign.
+
+By default Server validates a contiguous prefix of complete TCP frames
+and publishes that prefix in one ring batch. It rejects malformed input
+without publishing the bad frame. Reader pops up to 4 KiB at once,
+validates records and continues staging up to 64 KiB for FileStore.
+A single `eventfd` notification still wakes Reader after each recv()
+that publishes data; Reader still flushes storage before going idle.
+The 3 MiB pause and 1 MiB resume thresholds remain unchanged. The
+producer may overshoot its pause threshold by at most one currently
+processed TCP buffer (4 KiB) in the batched path; it remains well below
+the 4 MiB ring capacity.
+
+To retain the original frame-at-a-time IPC behavior for comparisons,
+configure `-DTELEMETRY_BATCH_IPC=OFF`. To compile two independent
+Release builds and run **the same verified workload** five times each:
+
+```bash
+make benchmark-ipc-compare
+```
+
+The output includes per-build medians and validated frame counts;
+individual results are saved in `build-ipc-results/scalar.csv` and
+`build-ipc-results/batched.csv`. The test uses one million frames,
+sender batch 128 and port 19000. Only the IPC mode differs between the
+two builds. Keep host CPU load comparable and inspect both throughput
+and correctness; no speedup is guaranteed. The existing
+`make benchmark-matrix` uses the default IPC mode (ON).
+
+`make test` includes partial-batch, malformed-span, ring-wrap, full-ring,
+scalar interoperability and forked SPSC ordering tests.
+
 ## CPU profiling with a separate C++20 controller and Linux perf
 
 **Profiling** means measuring where a running program spends CPU time,

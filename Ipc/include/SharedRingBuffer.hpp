@@ -40,6 +40,16 @@ class SharedRingBuffer
     [[nodiscard]]
     bool tryPop(std::span<std::byte> frame) noexcept;
 
+    // SPSC batch transfer: the span must hold a nonzero number of whole
+    // 32-byte frames. Return the number of FRAMES actually transferred.
+    // A full/empty ring may produce a partial batch or return zero.
+    // All transferred frames are published/released by one atomic store.
+    [[nodiscard]]
+    std::size_t tryPushBatch(std::span<const std::byte> frames) noexcept;
+
+    [[nodiscard]]
+    std::size_t tryPopBatch(std::span<std::byte> frames) noexcept;
+
     [[nodiscard]]
     std::size_t pendingFrames() const noexcept;
 

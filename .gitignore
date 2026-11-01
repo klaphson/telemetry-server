@@ -1,6 +1,9 @@
 build/
 build-bench/
 build-perf/
+build-ipc-scalar/
+build-ipc-batch/
+build-ipc-results/
 cmake-build-*/
 .vscode/
 .idea/

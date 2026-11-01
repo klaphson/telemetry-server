@@ -49,41 +49,70 @@ int Reader::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
         return true;
     };
 
+    // Shared frame processing is identical for scalar and batched IPC. The
+    // storage batch remains 64 KiB and keeps all durability boundaries.
+    const auto processFrame = [&](std::span<const std::byte> frame) {
+        const DecodeResult decoded = decode(frame);
+
+        if (!decoded) {
+            // Persist valid records before a malformed IPC frame.
+            if (!flushBatch()) {
+                return false;
+            }
+            std::cerr << "[reader] invalid IPC frame: " << toString(decoded.error) << '\n';
+            return false;
+        }
+
+        std::copy(frame.begin(), frame.end(), batch.data() + batchBytes);
+        batchBytes += kFrameSize;
+        if (batchBytes == batch.size() && !flushBatch()) {
+            return false;
+        }
+
+        const TelemetryRecord &record = decoded.record;
+        if (!config.quiet) {
+            std::cout << "[reader] telemetry:" << " sensor=" << record.sensorId
+                      << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
+                      << " value=" << record.value << '\n';
+        }
+        return true;
+    };
+
+#if TELEMETRY_BATCH_IPC
+    // Up to 128 frames are popped under a single release store to tail.
+    // The 4 KiB IPC batch is intentionally independent of the 64 KiB
+    // persistence batch, which is flushed before waiting for new input.
+    constexpr std::size_t ipcBatchBytes = 4096;
+    static_assert(ipcBatchBytes % kFrameSize == 0);
+    std::array<std::byte, ipcBatchBytes> ipcBatch{};
+#else
     Frame frame{};
+#endif
 
     while (true) {
         bool consumedAny = false;
 
-        // Try to receive every currently available frame.
-        while (ring.tryPop(frame)) {
+#if TELEMETRY_BATCH_IPC
+        while (true) {
+            const std::size_t popped = ring.tryPopBatch(ipcBatch);
+            if (popped == 0) {
+                break;
+            }
             consumedAny = true;
-
-            const DecodeResult decoded = decode(frame);
-
-            if (!decoded) {
-                // Preserve valid frames that preceded the invalid record,
-                // matching the old frame-at-a-time append behavior.
-                if (!flushBatch()) {
+            for (std::size_t index = 0; index < popped; ++index) {
+                if (!processFrame({ipcBatch.data() + index * kFrameSize, kFrameSize})) {
                     return EXIT_FAILURE;
                 }
-                std::cerr << "[reader] invalid IPC frame: " << toString(decoded.error) << '\n';
-                return EXIT_FAILURE;
-            }
-
-            std::copy(frame.begin(), frame.end(), batch.data() + batchBytes);
-            batchBytes += kFrameSize;
-            if (batchBytes == batch.size() && !flushBatch()) {
-                return EXIT_FAILURE;
-            }
-
-            const TelemetryRecord &record = decoded.record;
-
-            if (!config.quiet) {
-                std::cout << "[reader] telemetry:" << " sensor=" << record.sensorId
-                          << " metric=" << record.metricId << " timestamp_ns=" << record.timestampNs
-                          << " value=" << record.value << '\n';
             }
         }
+#else
+        while (ring.tryPop(frame)) {
+            consumedAny = true;
+            if (!processFrame(frame)) {
+                return EXIT_FAILURE;
+            }
+        }
+#endif
 
         // Flush even a partially filled batch before sleeping or reporting
         // space available. Otherwise a quiet producer could leave data

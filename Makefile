@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc-build benchmark-ipc-compare profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -35,6 +35,17 @@ benchmark-matrix: benchmark-build
 
 benchmark-test:
 	python3 -m unittest discover -s bench -p 'test_*.py'
+
+benchmark-ipc-build:
+	cmake -S . -B build-ipc-scalar -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTELEMETRY_BUILD_BENCHMARKS=ON -DTELEMETRY_BATCH_IPC=OFF
+	cmake --build build-ipc-scalar --target telemetry-server telemetry-load
+	cmake -S . -B build-ipc-batch -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTELEMETRY_BUILD_BENCHMARKS=ON -DTELEMETRY_BATCH_IPC=ON
+	cmake --build build-ipc-batch --target telemetry-server telemetry-load
+
+benchmark-ipc-compare: benchmark-ipc-build
+	mkdir -p build-ipc-results
+	SERVER_BIN="$(CURDIR)/build-ipc-scalar/telemetry-server" SENDER_BIN="$(CURDIR)/build-ipc-scalar/telemetry-load" bash bench/run_benchmark.sh 1000000 128 19000 --repeat 5 --csv build-ipc-results/scalar.csv
+	SERVER_BIN="$(CURDIR)/build-ipc-batch/telemetry-server" SENDER_BIN="$(CURDIR)/build-ipc-batch/telemetry-load" bash bench/run_benchmark.sh 1000000 128 19000 --repeat 5 --csv build-ipc-results/batched.csv
 
 profile-syscalls: benchmark-build
 	python3 bench/profile_syscalls.py --frames 10000 --batch 128 --port 19000

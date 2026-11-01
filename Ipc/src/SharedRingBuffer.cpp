@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 
 namespace
@@ -17,6 +18,7 @@ constexpr std::size_t cacheLineSize = 64;
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
+static_assert(sizeof(telemetry::protocol::Frame) == telemetry::protocol::kFrameSize);
 
 } // namespace
 
@@ -117,6 +119,71 @@ bool SharedRingBuffer::tryPop(std::span<std::byte> frame) noexcept
     m_layout->tail.store(tail + 1, std::memory_order_release);
 
     return true;
+}
+
+
+std::size_t SharedRingBuffer::tryPushBatch(std::span<const std::byte> frames) noexcept
+{
+    using telemetry::protocol::kFrameSize;
+
+    if (m_layout == nullptr || frames.empty() || frames.size() % kFrameSize != 0 ||
+        producerClosed()) {
+        return 0;
+    }
+
+    const std::uint64_t head = m_layout->head.load(std::memory_order_relaxed);
+    const std::uint64_t tail = m_layout->tail.load(std::memory_order_acquire);
+    const auto freeFrames = capacityFrames - static_cast<std::size_t>(head - tail);
+    const auto count = std::min(frames.size() / kFrameSize, freeFrames);
+
+    if (count == 0) {
+        return 0;
+    }
+
+    const auto index = static_cast<std::size_t>(head % capacityFrames);
+    const auto first = std::min(count, capacityFrames - index);
+    std::memcpy(&m_layout->slots[index], frames.data(), first * kFrameSize);
+
+    if (first != count) {
+        std::memcpy(&m_layout->slots[0], frames.data() + first * kFrameSize,
+                    (count - first) * kFrameSize);
+    }
+
+    // A single release store publishes the entire copied batch. The consumer
+    // sees fully initialized frames after its acquire load of head.
+    m_layout->head.store(head + count, std::memory_order_release);
+    return count;
+}
+
+std::size_t SharedRingBuffer::tryPopBatch(std::span<std::byte> frames) noexcept
+{
+    using telemetry::protocol::kFrameSize;
+
+    if (m_layout == nullptr || frames.empty() || frames.size() % kFrameSize != 0) {
+        return 0;
+    }
+
+    const std::uint64_t tail = m_layout->tail.load(std::memory_order_relaxed);
+    const std::uint64_t head = m_layout->head.load(std::memory_order_acquire);
+    const auto count =
+        std::min(frames.size() / kFrameSize, static_cast<std::size_t>(head - tail));
+
+    if (count == 0) {
+        return 0;
+    }
+
+    const auto index = static_cast<std::size_t>(tail % capacityFrames);
+    const auto first = std::min(count, capacityFrames - index);
+    std::memcpy(frames.data(), &m_layout->slots[index], first * kFrameSize);
+
+    if (first != count) {
+        std::memcpy(frames.data() + first * kFrameSize, &m_layout->slots[0],
+                    (count - first) * kFrameSize);
+    }
+
+    // Release the occupied slots only AFTER copying to private storage.
+    m_layout->tail.store(tail + count, std::memory_order_release);
+    return count;
 }
 
 std::size_t SharedRingBuffer::pendingFrames() const noexcept

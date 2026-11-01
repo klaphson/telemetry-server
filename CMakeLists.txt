@@ -7,12 +7,18 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(TELEMETRY_ENABLE_SANITIZERS "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 option(TELEMETRY_BUILD_BENCHMARKS "Build load generator" OFF)
+option(TELEMETRY_BATCH_IPC "Use SPSC batched ring transfers in Server and Reader" ON)
 option(TELEMETRY_PROFILE_CPU "Keep debug symbols and frame pointers in optimized builds for perf" OFF)
 
 add_library(telemetry_build_options INTERFACE)
 target_compile_options(telemetry_build_options INTERFACE
     -Wall -Wextra -Wpedantic -Wconversion -Wshadow
 )
+if(TELEMETRY_BATCH_IPC)
+    target_compile_definitions(telemetry_build_options INTERFACE TELEMETRY_BATCH_IPC=1)
+else()
+    target_compile_definitions(telemetry_build_options INTERFACE TELEMETRY_BATCH_IPC=0)
+endif()
 if(TELEMETRY_PROFILE_CPU)
     target_compile_options(telemetry_build_options INTERFACE -g -fno-omit-frame-pointer)
 endif()

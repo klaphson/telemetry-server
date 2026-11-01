@@ -14,10 +14,12 @@
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -376,6 +378,71 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
                 return true;
             }
 
+#if TELEMETRY_BATCH_IPC
+            // Validate every complete frame before publishing its contiguous
+            // prefix. Never put the malformed frame into shared memory.
+            const std::size_t availableFrames = client.inputBuffer.pendingBytes() / kFrameSize;
+            std::size_t validFrames = 0;
+            DecodeError invalidError = DecodeError::None;
+
+            for (std::size_t index = 0; index < availableFrames; ++index) {
+                const std::span<const std::byte> frame{
+                    client.inputBuffer.data.data() + client.inputBuffer.offset +
+                        index * kFrameSize,
+                    kFrameSize};
+                const DecodeResult decoded = decode(frame);
+
+                if (!decoded) {
+                    invalidError = decoded.error;
+                    break;
+                }
+
+                const TelemetryRecord &record = decoded.record;
+                if (!m_config.quiet) {
+                    std::cout << "[server] fd=" << clientFd << " sensor=" << record.sensorId
+                              << " metric=" << record.metricId
+                              << " timestamp_ns=" << record.timestampNs << " value=" << record.value
+                              << '\n';
+                }
+                ++validFrames;
+            }
+
+            if (validFrames != 0) {
+                const std::span<const std::byte> validBytes{
+                    client.inputBuffer.data.data() + client.inputBuffer.offset,
+                    validFrames * kFrameSize};
+                const std::size_t pushed = ring.tryPushBatch(validBytes);
+                client.inputBuffer.offset += pushed * kFrameSize;
+                publishedAny = pushed != 0;
+
+                if (pushed != validFrames) {
+                    // Existing ingress thresholds leave 1 MiB of headroom.
+                    // An unexpectedly full ring is still a fatal error, not
+                    // silent data loss. Wake the reader for any accepted prefix.
+                    if (!notifyPublished()) {
+                        return false;
+                    }
+                    std::cerr << "[server] shared ring full or unavailable\n";
+                    return false;
+                }
+
+                if (ring.pendingBytes() >= kPauseIngressBytes) {
+                    pauseIngressRequested = true;
+                }
+            }
+
+            if (invalidError != DecodeError::None) {
+                // Publish the preceding valid frames before rejecting this
+                // client, exactly as the scalar implementation does.
+                if (!notifyPublished()) {
+                    return false;
+                }
+                std::cerr << "[server] client fd=" << clientFd
+                          << " protocol error: " << toString(invalidError) << '\n';
+                removeClient(epollFd, clientFd);
+                return true;
+            }
+#else
             while (client.inputBuffer.pendingBytes() >= kFrameSize) {
 
                 const std::span<const std::byte> frame{
@@ -419,6 +486,8 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
                     pauseIngressRequested = true;
                 }
             }
+
+#endif
 
             // Wake the reader after publishing all frames from this recv().
             if (!notifyPublished()) {
