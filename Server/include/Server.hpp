@@ -4,7 +4,6 @@
 #include "Buffer.hpp"
 
 #include <cstdint>
-#include <span>
 #include <string>
 #include <unordered_map>
 
@@ -71,9 +70,6 @@ class Server
                     bool &pauseIngressRequested);
     void removeClient(int epoll_fd, int client_fd);
     void removeAllClients(int epollFd);
-
-    // Shared ring output
-    bool enqueueFrame(SharedRingBuffer &ring, std::span<const std::byte> frame) const;
 
     bool handleSignalEvent(const epoll_event &event, int epollFd, int &listenFd, State &state,
                            pid_t readerPid);

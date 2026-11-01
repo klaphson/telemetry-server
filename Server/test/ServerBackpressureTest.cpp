@@ -102,11 +102,6 @@ struct ServerTestAccess {
         return server.updateIngressInterest(epoll.fd, listener.fds[0], enabled);
     }
 
-    bool enqueue(std::span<const std::byte> frame)
-    {
-        return server.enqueueFrame(ring, frame);
-    }
-
     void drainState()
     {
         state = Server::State::Draining;
@@ -282,7 +277,7 @@ TEST_CASE_METHOD(ServerTestAccess, "draining never resumes ingress", "[backpress
     paused = true;
     drainState();
     const auto record = frameBytes();
-    REQUIRE(enqueue(std::as_bytes(std::span(record))));
+    REQUIRE(ring.tryPushBatch(std::as_bytes(std::span(record))) == 1);
     // Shutdown has already unregistered the listener; trying to resume would fail.
     REQUIRE(epoll_ctl(epoll.fd, EPOLL_CTL_DEL, listener.fds[0], nullptr) == 0);
     REQUIRE(readRing() == record);
@@ -354,16 +349,37 @@ TEST_CASE_METHOD(ServerTestAccess, "backpressure preserves remaining frames afte
     REQUIRE(forwarded + readRing() == initial + frames);
 }
 
-TEST_CASE_METHOD(ServerTestAccess, "a full ring is a fatal enqueue failure", "[backpressure]")
+TEST_CASE_METHOD(ServerTestAccess, "full ring causes Server ingress failure", "[backpressure]")
 {
+    // Bypass the normal high-watermark pause to test the defensive error path.
     const auto original = fillRing(SharedRingBuffer::capacityBytes);
-    const auto overflow = frameBytes();
-    REQUIRE_FALSE(enqueue(std::as_bytes(std::span(overflow))));
+    const auto overflow = frameBytes(51);
+    send(client.fds[1], overflow);
+    REQUIRE_FALSE(event(clientFd, EPOLLIN));
     REQUIRE(ring.pendingBytes() == SharedRingBuffer::capacityBytes);
+    REQUIRE(pendingInput() == overflow);
     eventfd_t notifications{};
     REQUIRE(eventfd_read(dataReady.fd, &notifications) == -1);
     REQUIRE(errno == EAGAIN);
     REQUIRE(readRing() == original);
+}
+
+TEST_CASE_METHOD(ServerTestAccess, "partial batch publishes a prefix and notifies Reader",
+                 "[backpressure]")
+{
+    const auto original = fillRing(SharedRingBuffer::capacityBytes - frameSize);
+    const auto first = frameBytes(52);
+    const auto second = frameBytes(53);
+    send(client.fds[1], first + second);
+    REQUIRE_FALSE(event(clientFd, EPOLLIN));
+    REQUIRE(ring.pendingBytes() == SharedRingBuffer::capacityBytes);
+    REQUIRE(pendingInput() == second);
+    eventfd_t notifications{};
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == 0);
+    REQUIRE(notifications == 1);
+    REQUIRE(eventfd_read(dataReady.fd, &notifications) == -1);
+    REQUIRE(errno == EAGAIN);
+    REQUIRE(readRing() == original + first);
 }
 
 TEST_CASE_METHOD(ServerTestAccess, "one recv batch generates one reader notification",
