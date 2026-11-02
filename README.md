@@ -898,6 +898,57 @@ comparisons. Tests cover partial batches, wraparound, full ring,
 single-frame API interoperation and forked SPSC ordering, including
 Server rejection of a full ring and notification after partial publication.
 
+## C++20 threads and synchronization laboratory (Stage 23)
+
+The standalone `bench/thread_sync_lab.cpp` builds `telemetry-thread-lab`.
+It deliberately does **not** change the production two-process TCP server.
+The lab models the **producer** (Server role) and **consumer** (Reader
+role) using two `std::jthread` objects, one bounded in-memory queue of
+4096 synthetic 32-byte frames, and two synchronization strategies:
+
+- `mutex`: `std::mutex`, `std::unique_lock`, and
+  `std::condition_variable_any`. Head, tail and close state are
+  accessed only while holding the mutex.
+- `atomic`: SPSC `std::atomic<std::uint64_t>` head/tail counters with
+  `memory_order_release` publication and `memory_order_acquire`
+  consumption. A separate mutex plus condition variables prevents
+  **lost wakeups** when the ring is full or empty. Thus this is **not
+  a purely lock-free queue**.
+
+Both variants use `std::stop_token` to cancel blocked waits, close the
+producer to let the consumer drain queued frames, verify every frame's
+contents and sequence, and propagate thread exceptions after joining.
+The lab performs no network I/O, filesystem writes or `fork()`: its
+frames are synthetic and its throughput **must not** be directly
+compared to production end-to-end TCP + disk measurements.
+
+```bash
+make thread-lab-test
+make thread-lab
+./build-bench/telemetry-thread-lab --mode mutex --frames 100000 --batch 32 --repeat 3
+./build-bench/telemetry-thread-lab --mode atomic --frames 100000 --batch 32 --repeat 3
+```
+
+For ThreadSanitizer instrumentation, run `make thread-lab-tsan`. TSan
+detects many unsynchronized memory accesses, but a clean run is not a
+proof that all possible races or deadlocks are absent. Some Docker
+Desktop kernels cannot execute TSan; run this target on native Linux
+if the tool itself fails to initialize. **Never instrument the
+production service merely to make the exercise run.**
+
+The self-test covers both synchronization modes with short, partial,
+full-capacity and wraparound workloads, draining after close, rejection
+of new writes after close, and interruption of a blocked consumer.
+`CMake` also registers it with CTest when both `BUILD_TESTING` and
+`TELEMETRY_BUILD_BENCHMARKS` are enabled.
+
+Compare strategies under the same workload and multiple repetitions:
+atomics are not automatically faster, and context switches, scheduling
+and condition-variable notification overhead can dominate. The next
+step is to learn about data races, deadlock patterns and the differences
+between thread and process failure isolation before attempting an
+optional full Server/Reader threaded variant.
+
 ## CPU profiling with a separate C++20 controller and Linux perf
 
 **Profiling** means measuring where a running program spends CPU time,

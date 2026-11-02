@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc thread-lab thread-lab-test thread-lab-tsan profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -39,6 +39,19 @@ benchmark-test:
 benchmark-ipc: benchmark-build
 	mkdir -p build-ipc-results
 	bash bench/run_benchmark.sh 1000000 128 19000 --repeat 5 --csv build-ipc-results/batched.csv
+
+# Educational two-thread producer/consumer exercise (no TCP or disk I/O).
+thread-lab: benchmark-build
+	./build-bench/telemetry-thread-lab --frames 1000000 --batch 128 --repeat 5
+
+thread-lab-test: benchmark-build
+	./build-bench/telemetry-thread-lab --self-test
+
+# The container kernel may restrict ThreadSanitizer; use only in development.
+thread-lab-tsan:
+	mkdir -p build-bench
+	$(CXX) -std=c++20 -g -O1 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -pthread -fsanitize=thread -fno-omit-frame-pointer bench/thread_sync_lab.cpp -o build-bench/telemetry-thread-lab-tsan
+	TSAN_OPTIONS=halt_on_error=1 ./build-bench/telemetry-thread-lab-tsan --self-test
 
 profile-syscalls: benchmark-build
 	python3 bench/profile_syscalls.py --frames 10000 --batch 128 --port 19000

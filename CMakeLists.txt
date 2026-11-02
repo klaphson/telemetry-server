@@ -50,6 +50,11 @@ add_executable(telemetry-server src/main.cpp)
 target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetry_build_options)
 
 if(TELEMETRY_BUILD_BENCHMARKS)
+    find_package(Threads REQUIRED)
+
+    add_executable(telemetry-thread-lab bench/thread_sync_lab.cpp)
+    target_link_libraries(telemetry-thread-lab PRIVATE telemetry_build_options Threads::Threads)
+
     add_executable(telemetry-load bench/telemetry_load.cpp)
     target_link_libraries(telemetry-load PRIVATE Protocol telemetry_build_options)
 
@@ -62,6 +67,9 @@ if(BUILD_TESTING)
     if(TELEMETRY_BUILD_BENCHMARKS)
         add_test(NAME telemetry_cpp_cpu_profiler_selftest
             COMMAND $<TARGET_FILE:telemetry-profile-cpu> --self-test)
+        add_test(NAME telemetry_thread_sync_lab_selftest
+            COMMAND $<TARGET_FILE:telemetry-thread-lab> --self-test)
+        set_tests_properties(telemetry_thread_sync_lab_selftest PROPERTIES TIMEOUT 30)
     endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
