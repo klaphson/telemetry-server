@@ -46,8 +46,10 @@ add_subdirectory(Ipc)
 add_subdirectory(Server)
 add_subdirectory(Reader)
 
+find_package(Threads REQUIRED)
 add_executable(telemetry-server src/main.cpp)
-target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetry_build_options)
+target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetry_build_options
+    Threads::Threads)
 
 if(TELEMETRY_BUILD_BENCHMARKS)
     add_executable(telemetry-load bench/telemetry_load.cpp)
@@ -77,8 +79,12 @@ if(BUILD_TESTING)
     add_test(NAME telemetry_graceful_shutdown
         COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/graceful_shutdown.sh" $<TARGET_FILE:telemetry-server>)
 
+    add_test(NAME telemetry_threaded_smoke
+        COMMAND bash "${CMAKE_CURRENT_SOURCE_DIR}/tests/threaded_smoke.sh" $<TARGET_FILE:telemetry-server>)
+
     set_tests_properties(
         telemetry_process_smoke
         telemetry_graceful_shutdown
+        telemetry_threaded_smoke
         PROPERTIES TIMEOUT 15 RESOURCE_LOCK telemetry_tcp_port)
 endif()

@@ -5,22 +5,25 @@
 #include "Server.hpp"
 #include "SharedRingBuffer.hpp"
 
+#include <pthread.h>
 #include <sys/eventfd.h>
 #include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <iostream>
-#include <string_view>
+#include <thread>
 
 namespace
 {
 
-bool blockManagedSignals(sigset_t &mask)
+bool blockManagedSignals(sigset_t &mask, bool processMode)
 {
     if (sigemptyset(&mask) == -1) {
         return false;
@@ -34,11 +37,96 @@ bool blockManagedSignals(sigset_t &mask)
         return false;
     }
 
-    if (sigaddset(&mask, SIGCHLD) == -1) {
+    if (processMode && sigaddset(&mask, SIGCHLD) == -1) {
         return false;
     }
 
-    return sigprocmask(SIG_BLOCK, &mask, nullptr) != -1;
+    const int error = pthread_sigmask(SIG_BLOCK, &mask, nullptr);
+    if (error != 0) {
+        errno = error;
+        return false;
+    }
+
+    return true;
+}
+
+struct Descriptor {
+    int fd;
+    explicit Descriptor(int value) : fd(value) {}
+    ~Descriptor()
+    {
+        if (fd != -1) {
+            close(fd);
+        }
+    }
+    Descriptor(const Descriptor &) = delete;
+    Descriptor &operator=(const Descriptor &) = delete;
+};
+
+int runThreaded(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
+                const sigset_t &signalMask, const ReaderConfig &readerConfig,
+                const ServerConfig &serverConfig)
+{
+    const Descriptor signalFd{signalfd(-1, &signalMask, SFD_NONBLOCK | SFD_CLOEXEC)};
+    if (signalFd.fd == -1) {
+        perror("signalfd");
+        return EXIT_FAILURE;
+    }
+
+    const Descriptor readerDoneFd{eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)};
+    if (readerDoneFd.fd == -1) {
+        perror("eventfd readerDone");
+        return EXIT_FAILURE;
+    }
+
+    std::atomic<int> readerResult{ReaderCompletion::pending};
+    const ReaderCompletion completion{readerDoneFd.fd, readerResult};
+
+    try {
+        std::jthread reader([&] {
+            int result = EXIT_FAILURE;
+            try {
+                result = Reader{}.run(ring, dataReadyFd, spaceReadyFd, readerConfig);
+            } catch (const std::exception &error) {
+                std::cerr << "[reader] exception: " << error.what() << '\n';
+            } catch (...) {
+                std::cerr << "[reader] unknown exception\n";
+            }
+
+            readerResult.store(result, std::memory_order_release);
+            if (!telemetry::ipc::notifyEvent(readerDoneFd.fd)) {
+                std::cerr << "[reader] could not notify server of completion\n";
+            }
+        });
+
+        int serverResult = EXIT_FAILURE;
+        try {
+            serverResult = Server{serverConfig}.run(
+                ring, dataReadyFd, spaceReadyFd, signalFd.fd, -1, &completion);
+        } catch (const std::exception &error) {
+            std::cerr << "[server] exception: " << error.what() << '\n';
+        } catch (...) {
+            std::cerr << "[server] unknown exception\n";
+        }
+
+        ring.closeProducer();
+        if (!telemetry::ipc::notifyEvent(dataReadyFd)) {
+            // A reader still blocked in eventfd_read cannot be joined.
+            std::cerr << "[main] failed to notify reader during shutdown\n";
+            std::_Exit(EXIT_FAILURE);
+        }
+        reader.join();
+
+        const int status = readerResult.load(std::memory_order_relaxed);
+        if (status != EXIT_SUCCESS) {
+            std::cerr << "[main] reader exited code=" << status << '\n';
+            return EXIT_FAILURE;
+        }
+        return serverResult;
+    } catch (const std::exception &error) {
+        std::cerr << "[main] reader thread: " << error.what() << '\n';
+        return EXIT_FAILURE;
+    }
 }
 
 } // namespace
@@ -67,12 +155,13 @@ int main(int argc, char* argv[])
 
     sigset_t signalMask{};
 
-    if (!blockManagedSignals(signalMask)) {
-        perror("sigprocmask");
+    const bool processMode = config.readerMode == ReaderMode::Process;
+    if (!blockManagedSignals(signalMask, processMode)) {
+        perror("pthread_sigmask");
         return EXIT_FAILURE;
     }
 
-    // Use line-buffered stdout in both processes, including with redirected output.
+    // Flush complete log lines even when stdout is redirected.
     if (std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ) != 0) {
         std::cerr << "[main] failed to configure stdout line buffering\n";
         return EXIT_FAILURE;
@@ -107,6 +196,14 @@ int main(int argc, char* argv[])
         perror("eventfd spaceReady");
         close(dataReadyFd);
         return EXIT_FAILURE;
+    }
+
+    if (!processMode) {
+        const int result = runThreaded(ring, dataReadyFd, spaceReadyFd, signalMask,
+                                       readerConfig, serverConfig);
+        close(dataReadyFd);
+        close(spaceReadyFd);
+        return result;
     }
 
     const pid_t readerPid = fork();

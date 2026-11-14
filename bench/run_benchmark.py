@@ -117,7 +117,7 @@ def sender_metrics(output):
     return float(values["sender_seconds"]), float(values["sender_frames_per_second"])
 
 
-def run_once(frames, batch, port, server_binary, sender_binary):
+def run_once(frames, batch, port, server_binary, sender_binary, reader_mode="process"):
     with tempfile.TemporaryDirectory(prefix="telemetry-benchmark-") as work:
         folder = Path(work)
         data = folder / "telemetry.bin"
@@ -127,9 +127,11 @@ def run_once(frames, batch, port, server_binary, sender_binary):
         successful = False
         try:
             with log_path.open("wb") as log:
+                command = [str(server_binary), "--port", str(port), "--data-file", str(data), "--quiet"]
+                if reader_mode == "thread":
+                    command.extend(["--reader-mode", "thread"])
                 proc = subprocess.Popen(
-                    [str(server_binary), "--port", str(port), "--data-file", str(data), "--quiet"],
-                    stdout=log, stderr=subprocess.STDOUT, start_new_session=True
+                    command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True
                 )
                 # Startup happens before the timed interval.
                 deadline = time.monotonic() + 10
@@ -192,6 +194,7 @@ def main():
     parser.add_argument("port", nargs="?", type=positive, default=19000)
     parser.add_argument("--batches", type=batches, help="comma-separated batch sizes, e.g. 1,32,128,512")
     parser.add_argument("--repeat", type=positive, default=1, help="runs per batch size")
+    parser.add_argument("--reader-mode", choices=("process", "thread"), default="process")
     parser.add_argument("--csv", type=Path, default=ROOT / "build-bench" / "benchmark_results.csv")
     args = parser.parse_args()
     sizes = args.batches if args.batches is not None else [args.batch]
@@ -214,7 +217,7 @@ def main():
             durations = []
             for attempt in range(1, args.repeat + 1):
                 print(f"\nBatch {batch}, run {attempt}/{args.repeat}", flush=True)
-                result = run_once(args.frames, batch, args.port, server, sender)
+                result = run_once(args.frames, batch, args.port, server, sender, args.reader_mode)
                 writer.writerow({"batch_frames": batch, "run": attempt, **result})
                 output.flush()
                 rates.append(result["end_to_end_frames_per_second"])

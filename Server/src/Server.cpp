@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <cstddef>
@@ -22,7 +23,6 @@
 #include <span>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 namespace
 {
@@ -45,7 +45,7 @@ Server::~Server()
 }
 
 int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int signalFd,
-                pid_t readerPid)
+                pid_t readerPid, const ReaderCompletion* readerCompletion)
 {
     int listen_fd = createSocket();
 
@@ -101,7 +101,14 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
         return EXIT_FAILURE;
     }
 
-    std::vector<epoll_event> events(kMaxEvents);
+    if (readerCompletion != nullptr && !addEpollFd(epoll_fd, readerCompletion->fd, EPOLLIN)) {
+        perror("epoll_ctl ADD readerDone");
+        close(epoll_fd);
+        close(listen_fd);
+        return EXIT_FAILURE;
+    }
+
+    std::array<epoll_event, kMaxEvents> events{};
 
     std::cout << "[server] pid=" << getpid() << '\n'
               << "[server] listening on 0.0.0.0:" << m_config.port << '\n';
@@ -111,14 +118,25 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
     bool running = true;
     bool ingressPaused = false;
 
+    // Periodically check the result in case the completion notification fails.
+    const int timeoutMs = readerCompletion != nullptr ? 250 : -1;
+
     while (running) {
+        if (readerCompletion != nullptr) {
+            const int status = readerCompletion->result.load(std::memory_order_acquire);
+            if (status != ReaderCompletion::pending) {
+                std::cerr << "[server] reader thread stopped code=" << status << '\n';
+                break;
+            }
+        }
+
         if (state == State::Draining && ring.empty()) {
 
             result = EXIT_SUCCESS;
             break;
         }
 
-        const int ready = epoll_wait(epoll_fd, events.data(), static_cast<int>(events.size()), -1);
+        const int ready = epoll_wait(epoll_fd, events.data(), static_cast<int>(events.size()), timeoutMs);
 
         if (ready == -1) {
             if (errno == EINTR) {
@@ -131,6 +149,22 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
 
         for (int i = 0; i < ready; ++i) {
             const auto &event = events[static_cast<std::size_t>(i)];
+
+            if (readerCompletion != nullptr && event.data.fd == readerCompletion->fd) {
+                if ((event.events & EPOLLIN) != 0U &&
+                    (event.events & (EPOLLERR | EPOLLHUP)) == 0U &&
+                    telemetry::ipc::consumeEvent(readerCompletion->fd)) {
+                    std::cerr << "[server] reader thread stopped code="
+                              << readerCompletion->result.load(std::memory_order_acquire)
+                              << '\n';
+                } else {
+                    std::cerr << "[server] reader completion eventfd error\n";
+                }
+
+                result = EXIT_FAILURE;
+                running = false;
+                break;
+            }
 
             if (event.data.fd == signalFd) {
                 if (!handleSignalEvent(event, epoll_fd, listen_fd, state, readerPid)) {

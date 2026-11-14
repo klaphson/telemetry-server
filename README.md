@@ -727,6 +727,36 @@ this branch using `make benchmark-matrix` (without `strace`). Then run
 `write()` calls, not throughput under tracing. Actual batch sizes depend
 on how much data is waiting in the shared ring when Reader drains it.
 
+## Experimental Reader thread
+
+The default `--reader-mode process` runs Reader in a child. On Linux,
+`--reader-mode thread` runs Reader in a `std::jthread` while Server keeps
+its epoll loop in the main thread.
+
+```bash
+./build/telemetry-server --reader-mode thread --data-file telemetry-thread.bin
+```
+
+Both modes use the same shared ring, IPC batches, backpressure thresholds,
+and FileStore. In thread mode, Reader publishes its exit code atomically
+and signals an eventfd registered in Server's epoll instance. An early Reader
+exit stops Server with failure. On normal shutdown, main closes the producer
+side of the ring, wakes Reader to finish writing and syncing, then joins it.
+The process owns the ring and eventfds until Reader has joined.
+
+Build a single Release binary with `make benchmark-build` and compare both modes
+with the same workload. Use separate CSV paths to keep both results.
+
+```bash
+bash bench/run_benchmark.sh 1000000 128 19000 --reader-mode process --repeat 5 \
+  --csv build-bench/reader-process.csv
+bash bench/run_benchmark.sh 1000000 128 19000 --reader-mode thread --repeat 5 \
+  --csv build-bench/reader-thread.csv
+```
+
+The benchmark checks the order and contents of persisted frames in both modes.
+The thread shares the failure domain of the Server process.
+
 ## TCP end-to-end benchmark
 
 The optional benchmark generates 32-byte telemetry frames using the existing

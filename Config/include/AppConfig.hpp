@@ -8,7 +8,11 @@
 namespace telemetry::config
 {
 
+enum class ReaderMode { Process, Thread };
+
 struct AppConfig {
+    ReaderMode readerMode = ReaderMode::Process;
+
     std::uint16_t port = 9000;
 
     std::string dataFilePath = "telemetry.bin";

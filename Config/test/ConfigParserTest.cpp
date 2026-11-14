@@ -43,6 +43,7 @@ TEST_CASE("configuration uses defaults without arguments")
 
     REQUIRE(result == ParseStatus::Success);
 
+    REQUIRE(config.readerMode == ReaderMode::Process);
     REQUIRE(config.port == 9000);
 
     REQUIRE(config.dataFilePath == "telemetry.bin");
@@ -54,6 +55,19 @@ TEST_CASE("configuration uses defaults without arguments")
     REQUIRE_FALSE(config.quiet);
 
     REQUIRE(errors.str().empty());
+}
+
+TEST_CASE("configuration selects the reader execution mode")
+{
+    AppConfig config;
+    std::ostringstream errors;
+
+    REQUIRE(parseOptions({"--reader-mode", "thread"}, config, errors) == ParseStatus::Success);
+    REQUIRE(config.readerMode == ReaderMode::Thread);
+    REQUIRE(parseOptions({"--reader-mode", "process"}, config, errors) == ParseStatus::Success);
+    REQUIRE(config.readerMode == ReaderMode::Process);
+    REQUIRE(parseOptions({"--reader-mode", "invalid"}, config, errors) == ParseStatus::Error);
+    REQUIRE(parseOptions({"--reader-mode"}, config, errors) == ParseStatus::Error);
 }
 
 TEST_CASE("configuration parses runtime options")

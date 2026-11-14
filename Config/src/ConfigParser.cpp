@@ -107,6 +107,24 @@ ParseStatus parseArguments(int argc, char* const argv[], AppConfig &config,
             return std::string_view{argv[index]};
         };
 
+        if (argument == "--reader-mode") {
+            const auto value = nextValue();
+            if (!value) {
+                return ParseStatus::Error;
+            }
+
+            if (*value == "process") {
+                config.readerMode = ReaderMode::Process;
+            } else if (*value == "thread") {
+                config.readerMode = ReaderMode::Thread;
+            } else {
+                errorOutput << "invalid reader mode: " << *value << '\n';
+                return ParseStatus::Error;
+            }
+
+            continue;
+        }
+
         if (argument == "--port") {
             const auto value = nextValue();
 
@@ -180,6 +198,7 @@ void printUsage(std::ostream &output, std::string_view programName)
 {
     output << "usage: " << programName << " [options]\n\n"
            << "options:\n"
+           << "  --reader-mode process|thread (default: process)\n"
            << "  --port PORT\n"
            << "  --data-file PATH\n"
            << "  --segment-bytes BYTES\n"

@@ -3,6 +3,7 @@
 
 #include "Buffer.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -18,6 +19,12 @@ struct ServerConfig {
 
 class SharedRingBuffer;
 
+struct ReaderCompletion {
+    static constexpr int pending = -1;
+    int fd;
+    const std::atomic<int> &result;
+};
+
 class Server
 {
   public:
@@ -31,7 +38,7 @@ class Server
 
     // Borrows the ring and descriptors; the caller owns their lifetimes.
     int run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int signalFd,
-            pid_t readerPid);
+            pid_t readerPid, const ReaderCompletion* readerCompletion = nullptr);
 
   private:
     friend struct ServerTestAccess;
