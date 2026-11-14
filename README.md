@@ -727,6 +727,70 @@ this branch using `make benchmark-matrix` (without `strace`). Then run
 `write()` calls, not throughput under tracing. Actual batch sizes depend
 on how much data is waiting in the shared ring when Reader drains it.
 
+## Linux CPU scheduling laboratory (Stage 24)
+
+`bench/scheduler_lab.cpp` is a standalone C++20 experiment using
+`std::jthread`, Linux `sched_getaffinity`, `pthread_setaffinity_np`,
+`getpriority`/`setpriority` and `getrusage(RUSAGE_THREAD)`. It
+does **not** change Server, Reader, their scheduling policies or the
+default application. It never requests real-time priority or elevated
+privileges.
+
+Two independent CPU-bound workers, A and B, perform deterministic
+synthetic work. The `--mode` option changes their CPU placement:
+
+- `free`: both inherit the current allowed CPU mask;
+- `same`: both are pinned to the first CPU in that mask;
+- `split`: each is pinned to a different allowed CPU (requires two);
+- `all` (default): runs all available configurations, rotating their
+  order between repetitions to reduce thermal and host-load bias.
+
+`--competitor` adds a third CPU-bound worker pinned to A's first
+allowed CPU. `--nice-b-offset N` (0..19) increases **only worker B's**
+Linux nice value relative to its inherited value, lowering its
+scheduling priority; lowering priority usually needs no extra rights.
+These are **threads within the lab process**, not production Server or
+Reader tasks. The container's affinity mask determines which CPUs can
+actually be selected, so CPU 0 on the host may not be available.
+If only one CPU is permitted, `all` skips `split`.
+
+```bash
+make scheduler-lab-test
+make scheduler-lab
+make scheduler-lab-contended
+```
+
+For a smaller experiment or to change just one variable:
+
+```bash
+./build-sched/telemetry-scheduler-lab --mode same --duration-ms 2000 \
+    --repeats 5 --nice-b-offset 5 \
+    --csv build-sched/same-low-priority.csv
+```
+
+The output CSV includes the requested and observed CPU, nice level,
+number of completed work chunks, thread wall time, thread CPU time,
+voluntary/involuntary context switches, observed CPU migrations and
+p50/p95/p99 **checkpoint gaps**. A checkpoint occurs every 32 work
+chunks: a gap includes computation and any scheduling interruption.
+**It is not TCP or application request latency**, and migrations are
+sampled (not an exhaustive count). The throughput here is work chunks
+per time period, **not telemetry frames/s**. Compare these numbers
+only across equivalent laboratory runs.
+
+`build-sched/scheduler-baseline.csv` and
+`build-sched/scheduler-contended.csv` are local experiment outputs.
+Test with and without a competing worker, on the same and different
+CPUs, and record median values over repeated runs. `make test`
+also registers `telemetry_scheduler_lab_selftest` if benchmarking
+build targets are enabled during CMake configuration.
+
+This laboratory is **the first part** of Stage 24. Its results do not
+establish that changing production Server/Reader CPU affinity helps.
+A later end-to-end comparison should measure real TCP throughput and
+latency under comparable host load without changing the production
+runtime or requesting privileged real-time scheduling.
+
 ## Experimental Reader thread
 
 The default `--reader-mode process` runs Reader in a child. On Linux,

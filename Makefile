@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc scheduler-lab-build scheduler-lab-test scheduler-lab scheduler-lab-contended profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -39,6 +39,20 @@ benchmark-test:
 benchmark-ipc: benchmark-build
 	mkdir -p build-ipc-results
 	bash bench/run_benchmark.sh 1000000 128 19000 --repeat 5 --csv build-ipc-results/batched.csv
+
+# Isolated Linux CPU scheduler experiment; no production service changes.
+scheduler-lab-build:
+	cmake -S . -B build-sched -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DTELEMETRY_BUILD_BENCHMARKS=ON
+	cmake --build build-sched --target telemetry-scheduler-lab
+
+scheduler-lab-test: scheduler-lab-build
+	./build-sched/telemetry-scheduler-lab --self-test
+
+scheduler-lab: scheduler-lab-build
+	./build-sched/telemetry-scheduler-lab --mode all --duration-ms 1000 --repeats 5 --csv build-sched/scheduler-baseline.csv
+
+scheduler-lab-contended: scheduler-lab-build
+	./build-sched/telemetry-scheduler-lab --mode all --duration-ms 1000 --repeats 5 --competitor --nice-b-offset 5 --csv build-sched/scheduler-contended.csv
 
 profile-syscalls: benchmark-build
 	python3 bench/profile_syscalls.py --frames 10000 --batch 128 --port 19000

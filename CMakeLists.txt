@@ -52,6 +52,10 @@ target_link_libraries(telemetry-server PRIVATE Config Server Reader Ipc telemetr
     Threads::Threads)
 
 if(TELEMETRY_BUILD_BENCHMARKS)
+    # Standalone Linux scheduler experiment; never linked into telemetry-server.
+    add_executable(telemetry-scheduler-lab bench/scheduler_lab.cpp)
+    target_link_libraries(telemetry-scheduler-lab PRIVATE telemetry_build_options Threads::Threads)
+
     add_executable(telemetry-load bench/telemetry_load.cpp)
     target_link_libraries(telemetry-load PRIVATE Protocol telemetry_build_options)
 
@@ -64,6 +68,9 @@ if(BUILD_TESTING)
     if(TELEMETRY_BUILD_BENCHMARKS)
         add_test(NAME telemetry_cpp_cpu_profiler_selftest
             COMMAND $<TARGET_FILE:telemetry-profile-cpu> --self-test)
+        add_test(NAME telemetry_scheduler_lab_selftest
+            COMMAND $<TARGET_FILE:telemetry-scheduler-lab> --self-test)
+        set_tests_properties(telemetry_scheduler_lab_selftest PROPERTIES TIMEOUT 30)
     endif()
 
     find_package(Python3 COMPONENTS Interpreter QUIET)

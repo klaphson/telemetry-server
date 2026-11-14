@@ -1,6 +1,7 @@
 build/
 build-bench/
 build-perf/
+build-sched/
 build-ipc-results/
 cmake-build-*/
 .vscode/
