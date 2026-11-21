@@ -61,6 +61,24 @@ if(TELEMETRY_BUILD_BENCHMARKS)
 endif()
 
 if(BUILD_TESTING)
+    # C++20 integration harness: no Python or Catch2 required.
+    add_executable(telemetry-multi-client-test tests/multi_client_tcp.cpp)
+    target_link_libraries(telemetry-multi-client-test PRIVATE
+        Protocol telemetry_build_options Threads::Threads)
+
+    add_test(NAME telemetry_multi_client_verifier_selftest
+        COMMAND $<TARGET_FILE:telemetry-multi-client-test> --self-test)
+    add_test(NAME telemetry_multi_client_process
+        COMMAND $<TARGET_FILE:telemetry-multi-client-test>
+            $<TARGET_FILE:telemetry-server> --mode process)
+    add_test(NAME telemetry_multi_client_thread
+        COMMAND $<TARGET_FILE:telemetry-multi-client-test>
+            $<TARGET_FILE:telemetry-server> --mode thread)
+    set_tests_properties(
+        telemetry_multi_client_process
+        telemetry_multi_client_thread
+        PROPERTIES TIMEOUT 45 RESOURCE_LOCK telemetry_tcp_port)
+
     if(TELEMETRY_BUILD_BENCHMARKS)
         add_test(NAME telemetry_cpp_cpu_profiler_selftest
             COMMAND $<TARGET_FILE:telemetry-profile-cpu> --self-test)
@@ -72,6 +90,7 @@ if(BUILD_TESTING)
             COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                 -s "${CMAKE_CURRENT_SOURCE_DIR}/bench" -p "test_*.py")
         set_tests_properties(telemetry_benchmark_harness PROPERTIES TIMEOUT 15)
+
     endif()
 
     add_test(NAME telemetry_process_smoke
