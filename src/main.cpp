@@ -7,11 +7,13 @@
 
 #include <pthread.h>
 #include <sys/eventfd.h>
+#include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -48,6 +50,56 @@ bool blockManagedSignals(sigset_t &mask, bool processMode)
     }
 
     return true;
+}
+
+// A stopped or wedged Reader must not make process-mode shutdown infinite.
+bool waitForReaderExit(pid_t readerPid, int &status)
+{
+    using namespace std::chrono_literals;
+    const auto deadline = std::chrono::steady_clock::now() + 10s;
+
+    while (true) {
+        const pid_t exited = waitpid(readerPid, &status, WNOHANG);
+        if (exited == readerPid) {
+            return true;
+        }
+        if (exited == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            perror("waitpid reader");
+            return false;
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::cerr << "[main] reader shutdown timeout after 10s; sending SIGKILL\n";
+            if (kill(readerPid, SIGKILL) == -1 && errno != ESRCH) {
+                perror("kill timed-out reader");
+            }
+            // SIGKILL cannot interrupt tasks stuck in uninterruptible I/O.
+            // Bound the reaping attempt too, rather than waiting forever.
+            const auto reapDeadline = std::chrono::steady_clock::now() + 2s;
+            while (true) {
+                const pid_t reaped = waitpid(readerPid, &status, WNOHANG);
+                if (reaped == readerPid) {
+                    return false;
+                }
+                if (reaped == -1) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    perror("waitpid timed-out reader");
+                    return false;
+                }
+                if (std::chrono::steady_clock::now() >= reapDeadline) {
+                    std::cerr << "[main] reader could not be reaped after SIGKILL\n";
+                    return false;
+                }
+                std::this_thread::sleep_for(20ms);
+            }
+        }
+        std::this_thread::sleep_for(20ms);
+    }
 }
 
 struct Descriptor {
@@ -206,6 +258,7 @@ int main(int argc, char* argv[])
         return result;
     }
 
+    const pid_t expectedParentPid = getpid();
     const pid_t readerPid = fork();
     if (readerPid == -1) {
         perror("fork");
@@ -215,6 +268,17 @@ int main(int argc, char* argv[])
     }
 
     if (readerPid == 0) {
+        // Linux kills the process-mode Reader if its parent dies unexpectedly.
+        // SIGKILL is deliberately unmaskable: SIGTERM is blocked for signalfd.
+        // Recheck PPID to close the race between fork() and prctl().
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) == -1) {
+            perror("prctl(PR_SET_PDEATHSIG)");
+            _exit(EXIT_FAILURE);
+        }
+        if (getppid() != expectedParentPid) {
+            _exit(EXIT_FAILURE);
+        }
+
         const int result = Reader{}.run(ring, dataReadyFd, spaceReadyFd, readerConfig);
         close(dataReadyFd);
         close(spaceReadyFd);
@@ -244,14 +308,7 @@ int main(int argc, char* argv[])
         close(spaceReadyFd);
 
         int status = 0;
-
-        while (waitpid(readerPid, &status, 0) == -1) {
-            if (errno != EINTR) {
-                perror("waitpid");
-                break;
-            }
-        }
-
+        (void)waitForReaderExit(readerPid, status);
         return EXIT_FAILURE;
     }
 
@@ -278,11 +335,8 @@ int main(int argc, char* argv[])
     close(spaceReadyFd);
 
     int status = 0;
-    while (waitpid(readerPid, &status, 0) == -1) {
-        if (errno != EINTR) {
-            perror("waitpid");
-            return EXIT_FAILURE;
-        }
+    if (!waitForReaderExit(readerPid, status)) {
+        return EXIT_FAILURE;
     }
 
     if (WIFSIGNALED(status)) {

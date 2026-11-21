@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc multi-client-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc multi-client-test process-failure-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -38,6 +38,9 @@ benchmark-test:
 
 multi-client-test: build
 	ctest --test-dir build -R '^telemetry_multi_client_' --output-on-failure
+
+process-failure-test: build
+	ctest --test-dir build -R '^telemetry_process_failure_' --output-on-failure
 
 benchmark-ipc: benchmark-build
 	mkdir -p build-ipc-results

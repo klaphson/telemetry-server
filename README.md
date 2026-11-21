@@ -567,6 +567,52 @@ ctest --test-dir build --output-on-failure \
     -R '^telemetry_(process_smoke|graceful_shutdown)$' --repeat until-fail:100
 ```
 
+## Process lifetime and fault injection (Stage 26)
+
+On Linux, process mode sets `PR_SET_PDEATHSIG` to `SIGKILL` in the
+forked Reader and checks `getppid()` immediately afterward to close the
+fork-to-prctl race. If the Server parent dies unexpectedly, the Reader
+is terminated instead of remaining indefinitely blocked on `eventfd`.
+**This is an emergency containment mechanism, not a durability guarantee:**
+a killed Reader can lose data not yet synced to the filesystem.
+
+On normal process-mode shutdown, the Server closes the producer, wakes
+Reader and waits for its final flush/sync. Waiting for the Reader is
+now bounded at 10 seconds; on timeout, the parent sends `SIGKILL`,
+tries to reap the child for up to another 2 seconds, then returns failure.
+A Reader stuck in uninterruptible kernel I/O may remain unreaped until
+that I/O resolves; the Server must not block indefinitely on it.
+The 10-second bound is a failure policy, not a guarantee of successful
+storage synchronization. A slow or stalled disk could trigger it.
+The experimental `--reader-mode thread` still uses `std::jthread::join()`
+and does **not** have an equivalent hard timeout; forcefully cancelling
+an arbitrary C++ thread would be unsafe.
+
+The C++20 `tests/process_failure.cpp` harness runs five scenarios,
+each with a temporary data directory, an ephemeral TCP port, a bounded
+wait, and process-group cleanup on failure:
+
+- `reader-killed`: kill Reader with SIGKILL, ensure Server fails;
+- `parent-killed`: kill Server with SIGKILL, ensure Reader no longer
+  runs (a zombie awaiting reaping by the container's init is acceptable);
+- `stopped-reader-timeout`: stop Reader with SIGSTOP, request SIGTERM
+  and check bounded failure instead of an infinite `waitpid()`;
+- `graceful-process` / `graceful-thread`: transmit 256 frames, shut
+  down cleanly, and verify byte-exact persisted records and Reader EOF.
+
+```bash
+make process-failure-test
+ctest --test-dir build -R '^telemetry_process_failure_' --repeat until-fail:5 \
+    --output-on-failure
+```
+
+These tests are Linux-specific and depend on `/proc` and normal POSIX
+signals. Run them in the development container, not against the deployed
+service. Readers exiting unexpectedly and SIGCHLD stop/continue are also
+covered by existing smoke and Catch2 signal tests. The tests do not
+simulate a power cut, filesystem corruption, uninterruptible kernel
+I/O or all possible combined signal-delivery races.
+
 ## Multi-client TCP integration tests (Stage 25)
 
 The native C++20 executable `telemetry-multi-client-test`, implemented in
