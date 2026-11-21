@@ -61,6 +61,20 @@ if(TELEMETRY_BUILD_BENCHMARKS)
 endif()
 
 if(BUILD_TESTING)
+    # Process lifetime and fault-injection checks run as an isolated C++20 tool.
+    add_executable(telemetry-process-failure-test tests/process_failure.cpp)
+    target_link_libraries(telemetry-process-failure-test PRIVATE
+        Protocol telemetry_build_options Threads::Threads)
+    foreach(failure_case IN ITEMS
+            reader-killed parent-killed stopped-reader-timeout
+            graceful-process graceful-thread)
+        add_test(NAME telemetry_process_failure_${failure_case}
+            COMMAND $<TARGET_FILE:telemetry-process-failure-test>
+                $<TARGET_FILE:telemetry-server> --scenario ${failure_case})
+        set_tests_properties(telemetry_process_failure_${failure_case} PROPERTIES
+            TIMEOUT 25 RESOURCE_LOCK telemetry_tcp_port)
+    endforeach()
+
     # C++20 integration harness: no Python or Catch2 required.
     add_executable(telemetry-multi-client-test tests/multi_client_tcp.cpp)
     target_link_libraries(telemetry-multi-client-test PRIVATE
