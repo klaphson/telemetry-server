@@ -72,6 +72,20 @@ if(BUILD_TESTING)
             COMMAND "${Python3_EXECUTABLE}" -m unittest discover
                 -s "${CMAKE_CURRENT_SOURCE_DIR}/bench" -p "test_*.py")
         set_tests_properties(telemetry_benchmark_harness PROPERTIES TIMEOUT 15)
+
+        add_test(NAME telemetry_multi_client_verifier_selftest
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/multi_client_tcp.py"
+                --self-test)
+        add_test(NAME telemetry_multi_client_process
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/multi_client_tcp.py"
+                $<TARGET_FILE:telemetry-server> --mode process)
+        add_test(NAME telemetry_multi_client_thread
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/multi_client_tcp.py"
+                $<TARGET_FILE:telemetry-server> --mode thread)
+        set_tests_properties(
+            telemetry_multi_client_process
+            telemetry_multi_client_thread
+            PROPERTIES TIMEOUT 45 RESOURCE_LOCK telemetry_tcp_port)
     endif()
 
     add_test(NAME telemetry_process_smoke

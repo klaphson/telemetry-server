@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc multi-client-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -35,6 +35,9 @@ benchmark-matrix: benchmark-build
 
 benchmark-test:
 	python3 -m unittest discover -s bench -p 'test_*.py'
+
+multi-client-test: build
+	python3 tests/multi_client_tcp.py ./build/telemetry-server --mode both
 
 benchmark-ipc: benchmark-build
 	mkdir -p build-ipc-results

@@ -537,11 +537,11 @@ CMake uses an installed Catch2 3 package when available; otherwise it downloads
 Catch2 v3.8.1 during configuration, which requires network access. Configure with
 `-DBUILD_TESTING=OFF` to build without tests or Catch2.
 
-The C++ suite has 53 tests: 51 Catch2 cases (including 12 configuration
-cases and seven signal cases) and two process integration tests. The optional
-Python benchmark harness adds five more unit tests.
-Coverage gaps include merged child-state notifications, unexpected parent death,
-and unread-frame preservation during paused disconnects.
+The test suite includes Catch2 cases, process and threaded smoke tests,
+and Python benchmark harness checks. CTest also runs the multiclient TCP
+tests in both Reader modes whenever Python3 is available.
+Coverage gaps still include merged child-state notifications, unexpected parent
+death, and unread-frame preservation during paused disconnects.
 
 The Bash smoke test sends a fragmented binary frame followed by another frame,
 checks decoded reader output, then terminates the reader to verify that the parent
@@ -566,6 +566,42 @@ logging failures:
 ctest --test-dir build --output-on-failure \
     -R '^telemetry_(process_smoke|graceful_shutdown)$' --repeat until-fail:100
 ```
+
+## Multi-client TCP integration tests (Stage 25)
+
+The standalone `tests/multi_client_tcp.py` exercises concurrent loopback
+clients against the **unmodified** Server/Reader binary in both
+`--reader-mode process` and `--reader-mode thread`. It checks:
+
+- Three concurrent fast clients and deliberately slow, fragmented, and idle
+  senders, with per-client sequence numbers and sensor IDs.
+- A client that disconnects after a truncated final frame; only its complete
+  frames must be stored.
+- A client with an invalid 32-byte protocol frame, followed by another
+  valid connection to prove that one bad client does not stop the server.
+- A sustained sending client alongside a short fragmented probe: the probe
+  must appear in the data file **while** fast traffic continues, and the fast
+  client must continue making progress afterward.
+- Graceful shutdown and byte-exact verification of **every persisted frame**.
+
+The global order among connections is intentionally unconstrained.
+TCP guarantees ordering *within* a connection only; the verifier checks
+that each sensor's sequence is strictly increasing without missing or
+duplicate records. Scenarios are bounded by timeouts, use a temporary
+storage directory and an ephemeral loopback port, and kill the test's
+process group if the server fails.
+
+```bash
+make multi-client-test
+# or after make build:
+ctest --test-dir build -R '^telemetry_multi_client_' --output-on-failure
+```
+
+The standalone `--self-test` validates the data-file verifier without
+starting a server. The integration tests confirm progress under this
+particular bounded workload; **they do not mathematically prove starvation
+freedom under arbitrary continuous traffic**. Other process-failure and
+large-scale overload tests belong to later roadmap stages.
 
 ## Docker development
 
