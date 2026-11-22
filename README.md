@@ -461,6 +461,34 @@ reports `[main] reader exited code=1`. If the reader is killed by a signal, the
 parent instead reports `[main] reader terminated by signal=N`, where `N` is the
 signal number.
 
+### Stage 27: restart and storage failure checks (C++20)
+
+`tests/storage_recovery.cpp` is a separate CTest executable linked against
+production `Storage` and `Protocol`. It checks three Linux scenarios:
+
+- `restart`: simulate a process crash leaving 11 bytes of an incomplete frame,
+  restart `FileStore`, truncate only the incomplete tail, and append the next
+  frame without corrupting the preceding complete frame;
+- `rotation`: reopen `FileStore` twice with a two-frame segment limit and
+  verify that both archives and the active file contain every expected frame;
+- `write-failure`: enforce `RLIMIT_FSIZE` in an isolated subprocess, so a
+  partial `write()` is followed by `EFBIG`. Confirm that append reports
+  failure and the next startup removes the incomplete tail before appending.
+
+After `make build`, run:
+
+```bash
+make storage-recovery-test
+ctest --test-dir build -R '^telemetry_storage_recovery_' --output-on-failure
+```
+
+`RLIMIT_FSIZE` tests the short-write/error path deterministically; **`EFBIG`
+from a file-size limit is not `ENOSPC` from an actually full filesystem**.
+An ENOSPC integration test still needs a controlled, capacity-limited volume.
+These checks simulate process failure, not power failure. `fdatasync()`
+returns success on the test filesystem, but the tests cannot guarantee its
+behavior during sudden power loss or storage hardware faults.
+
 ## Tests
 
 Stop any server using port 9000 before running:
