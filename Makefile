@@ -42,6 +42,9 @@ multi-client-test: build
 process-failure-test: build
 	ctest --test-dir build -R '^telemetry_process_failure_' --output-on-failure
 
+storage-recovery-test: build
+	ctest --test-dir build -R '^telemetry_storage_recovery_' --output-on-failure
+
 benchmark-ipc: benchmark-build
 	mkdir -p build-ipc-results
 	bash bench/run_benchmark.sh 1000000 128 19000 --repeat 5 --csv build-ipc-results/batched.csv

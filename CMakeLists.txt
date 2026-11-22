@@ -61,6 +61,17 @@ if(TELEMETRY_BUILD_BENCHMARKS)
 endif()
 
 if(BUILD_TESTING)
+    # Restart, rotation and bounded write-failure checks use the production FileStore.
+    add_executable(telemetry-storage-recovery-test tests/storage_recovery.cpp)
+    target_link_libraries(telemetry-storage-recovery-test PRIVATE
+        Storage Protocol telemetry_build_options Threads::Threads)
+    foreach(recovery_case IN ITEMS restart rotation write-failure)
+        add_test(NAME telemetry_storage_recovery_${recovery_case}
+            COMMAND $<TARGET_FILE:telemetry-storage-recovery-test> ${recovery_case})
+        set_tests_properties(telemetry_storage_recovery_${recovery_case}
+            PROPERTIES TIMEOUT 15)
+    endforeach()
+
     # Process lifetime and fault-injection checks run as an isolated C++20 tool.
     add_executable(telemetry-process-failure-test tests/process_failure.cpp)
     target_link_libraries(telemetry-process-failure-test PRIVATE
