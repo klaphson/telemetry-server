@@ -121,7 +121,6 @@ bool SharedRingBuffer::tryPop(std::span<std::byte> frame) noexcept
     return true;
 }
 
-
 std::size_t SharedRingBuffer::tryPushBatch(std::span<const std::byte> frames) noexcept
 {
     using telemetry::protocol::kFrameSize;
@@ -165,8 +164,7 @@ std::size_t SharedRingBuffer::tryPopBatch(std::span<std::byte> frames) noexcept
 
     const std::uint64_t tail = m_layout->tail.load(std::memory_order_relaxed);
     const std::uint64_t head = m_layout->head.load(std::memory_order_acquire);
-    const auto count =
-        std::min(frames.size() / kFrameSize, static_cast<std::size_t>(head - tail));
+    const auto count = std::min(frames.size() / kFrameSize, static_cast<std::size_t>(head - tail));
 
     if (count == 0) {
         return 0;

@@ -268,8 +268,7 @@ TEST_CASE("FileStore splits a batch across segment rotations without losing fram
 
     TemporaryDirectory directory;
     const auto activePath = directory.file("telemetry.bin");
-    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize,
-                                 .syncEveryBytes = kFrameSize};
+    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize, .syncEveryBytes = kFrameSize};
 
     std::vector<std::byte> batch;
     for (std::uint64_t timestamp = 1; timestamp <= 5; ++timestamp) {

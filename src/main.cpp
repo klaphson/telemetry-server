@@ -13,8 +13,8 @@
 #include <unistd.h>
 
 #include <atomic>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -153,8 +153,8 @@ int runThreaded(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
 
         int serverResult = EXIT_FAILURE;
         try {
-            serverResult = Server{serverConfig}.run(
-                ring, dataReadyFd, spaceReadyFd, signalFd.fd, -1, &completion);
+            serverResult = Server{serverConfig}.run(ring, dataReadyFd, spaceReadyFd, signalFd.fd,
+                                                    -1, &completion);
         } catch (const std::exception &error) {
             std::cerr << "[server] exception: " << error.what() << '\n';
         } catch (...) {
@@ -251,8 +251,8 @@ int main(int argc, char* argv[])
     }
 
     if (!processMode) {
-        const int result = runThreaded(ring, dataReadyFd, spaceReadyFd, signalMask,
-                                       readerConfig, serverConfig);
+        const int result =
+            runThreaded(ring, dataReadyFd, spaceReadyFd, signalMask, readerConfig, serverConfig);
         close(dataReadyFd);
         close(spaceReadyFd);
         return result;

@@ -10,8 +10,8 @@
 
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -29,10 +29,10 @@
 namespace
 {
 namespace fs = std::filesystem;
-using telemetry::protocol::Frame;
-using telemetry::protocol::TelemetryRecord;
 using telemetry::protocol::encode;
+using telemetry::protocol::Frame;
 using telemetry::protocol::kFrameSize;
+using telemetry::protocol::TelemetryRecord;
 using namespace std::chrono_literals;
 
 void check(bool condition, std::string_view message)
@@ -62,7 +62,10 @@ class TemporaryDirectory
     {
         return m_path / std::string(name);
     }
-    [[nodiscard]] const fs::path &path() const { return m_path; }
+    [[nodiscard]] const fs::path &path() const
+    {
+        return m_path;
+    }
 
   private:
     fs::path m_path;
@@ -70,7 +73,9 @@ class TemporaryDirectory
 
 Frame frame(std::uint64_t sequence)
 {
-    return encode(TelemetryRecord{.sensorId = 7, .metricId = 3, .timestampNs = sequence,
+    return encode(TelemetryRecord{.sensorId = 7,
+                                  .metricId = 3,
+                                  .timestampNs = sequence,
                                   .value = static_cast<double>(sequence)});
 }
 
@@ -130,8 +135,8 @@ void runChild(int (*function)(const fs::path &), const fs::path &path)
 
 int childWritesPartialTail(const fs::path &path)
 {
-    FileStore store{FileStoreConfig{.maxSegmentBytes = 4 * kFrameSize,
-                                   .syncEveryBytes = kFrameSize}};
+    FileStore store{
+        FileStoreConfig{.maxSegmentBytes = 4 * kFrameSize, .syncEveryBytes = kFrameSize}};
     if (!store.openFile(path.string()) || !store.appendFrame(frame(1)) || !store.sync()) {
         return 1;
     }
@@ -154,8 +159,8 @@ void restartRecovery()
     check(fs::file_size(path) == kFrameSize + 11, "truncated tail was not created");
 
     {
-        FileStore store{FileStoreConfig{.maxSegmentBytes = 4 * kFrameSize,
-                                        .syncEveryBytes = kFrameSize}};
+        FileStore store{
+            FileStoreConfig{.maxSegmentBytes = 4 * kFrameSize, .syncEveryBytes = kFrameSize}};
         check(store.openFile(path.string()), "FileStore failed to reopen a partial file");
         check(fs::file_size(path) == kFrameSize, "partial tail was not removed");
         check(store.appendFrame(frame(2)), "append after recovery failed");
@@ -169,8 +174,7 @@ void rotationAcrossRestarts()
 {
     TemporaryDirectory directory;
     const auto path = directory.file("telemetry.bin");
-    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize,
-                                 .syncEveryBytes = kFrameSize};
+    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize, .syncEveryBytes = kFrameSize};
     for (std::uint64_t first = 1; first <= 5; first += 2) {
         FileStore store(config);
         check(store.openFile(path.string()), "rotation reopen failed");
@@ -216,8 +220,7 @@ int childRunsIntoFileLimit(const fs::path &path)
     if (signal(SIGXFSZ, SIG_IGN) == SIG_ERR) {
         return 2;
     }
-    const rlimit limit{static_cast<rlim_t>(kFrameSize + 11),
-                       static_cast<rlim_t>(kFrameSize + 11)};
+    const rlimit limit{static_cast<rlim_t>(kFrameSize + 11), static_cast<rlim_t>(kFrameSize + 11)};
     if (setrlimit(RLIMIT_FSIZE, &limit) != 0) {
         return 3;
     }
@@ -232,11 +235,10 @@ void recoverAfterWriteFailure()
     TemporaryDirectory directory;
     const auto path = directory.file("telemetry.bin");
     runChild(childRunsIntoFileLimit, path);
-    check(fs::file_size(path) == kFrameSize + 11,
-          "RLIMIT_FSIZE did not produce a truncated frame");
+    check(fs::file_size(path) == kFrameSize + 11, "RLIMIT_FSIZE did not produce a truncated frame");
     {
-        FileStore store{FileStoreConfig{.maxSegmentBytes = 4 * kFrameSize,
-                                        .syncEveryBytes = kFrameSize}};
+        FileStore store{
+            FileStoreConfig{.maxSegmentBytes = 4 * kFrameSize, .syncEveryBytes = kFrameSize}};
         check(store.openFile(path.string()), "recover after write error failed");
         check(fs::file_size(path) == kFrameSize, "write error tail was not truncated");
         check(store.appendFrame(frame(2)), "append after write failure recovery failed");

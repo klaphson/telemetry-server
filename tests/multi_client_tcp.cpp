@@ -26,8 +26,8 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
-#include <iterator>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -40,13 +40,14 @@
 #include <utility>
 #include <vector>
 
-namespace {
+namespace
+{
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
-using telemetry::protocol::Frame;
-using telemetry::protocol::TelemetryRecord;
 using telemetry::protocol::encode;
+using telemetry::protocol::Frame;
 using telemetry::protocol::kFrameSize;
+using telemetry::protocol::TelemetryRecord;
 using Clock = std::chrono::steady_clock;
 
 [[noreturn]] void fail(const std::string &message)
@@ -89,7 +90,10 @@ class Descriptor
         }
         return *this;
     }
-    [[nodiscard]] int get() const { return m_fd; }
+    [[nodiscard]] int get() const
+    {
+        return m_fd;
+    }
 
   private:
     int m_fd;
@@ -100,7 +104,8 @@ class TemporaryDirectory
   public:
     explicit TemporaryDirectory(std::string_view prefix)
     {
-        std::string pattern = (fs::temp_directory_path() / (std::string(prefix) + "XXXXXX")).string();
+        std::string pattern =
+            (fs::temp_directory_path() / (std::string(prefix) + "XXXXXX")).string();
         const char* const folder = mkdtemp(pattern.data());
         if (folder == nullptr) {
             fail(systemError("mkdtemp"));
@@ -114,7 +119,10 @@ class TemporaryDirectory
     }
     TemporaryDirectory(const TemporaryDirectory &) = delete;
     TemporaryDirectory &operator=(const TemporaryDirectory &) = delete;
-    [[nodiscard]] const fs::path &path() const { return m_path; }
+    [[nodiscard]] const fs::path &path() const
+    {
+        return m_path;
+    }
 
   private:
     fs::path m_path;
@@ -122,8 +130,10 @@ class TemporaryDirectory
 
 Frame record(std::uint32_t sensor, std::uint64_t sequence)
 {
-    return encode(TelemetryRecord{.sensorId = sensor, .metricId = 7,
-                                  .timestampNs = sequence, .value = static_cast<double>(sensor)});
+    return encode(TelemetryRecord{.sensorId = sensor,
+                                  .metricId = 7,
+                                  .timestampNs = sequence,
+                                  .value = static_cast<double>(sensor)});
 }
 
 std::vector<char> readFile(const fs::path &path)
@@ -156,21 +166,22 @@ std::size_t verifyRecords(const fs::path &path,
         expectedFrames += count;
     }
     require(data.size() == expectedFrames * kFrameSize,
-            "wrong file size: expected " + std::to_string(expectedFrames * kFrameSize) +
-                ", got " + std::to_string(data.size()));
+            "wrong file size: expected " + std::to_string(expectedFrames * kFrameSize) + ", got " +
+                std::to_string(data.size()));
 
     std::map<std::uint32_t, std::uint64_t> positions;
     for (std::size_t offset = 0; offset < data.size(); offset += kFrameSize) {
         const auto* const bytes = reinterpret_cast<const std::byte*>(data.data() + offset);
         const auto decoded = telemetry::protocol::decode({bytes, kFrameSize});
-        require(static_cast<bool>(decoded), "invalid protocol frame at byte " + std::to_string(offset));
+        require(static_cast<bool>(decoded),
+                "invalid protocol frame at byte " + std::to_string(offset));
         const auto sensor = decoded.record.sensorId;
         require(expected.contains(sensor), "unexpected sensor " + std::to_string(sensor));
         const std::uint64_t next = ++positions[sensor];
         const Frame correct = record(sensor, next);
         require(std::memcmp(bytes, correct.data(), kFrameSize) == 0,
-                "corrupt, duplicate or out-of-order frame for sensor " +
-                    std::to_string(sensor) + " at sequence " + std::to_string(next));
+                "corrupt, duplicate or out-of-order frame for sensor " + std::to_string(sensor) +
+                    " at sequence " + std::to_string(next));
     }
     for (const auto &[sensor, count] : expected) {
         require(positions[sensor] == count, "missing frames for sensor " + std::to_string(sensor));
@@ -387,7 +398,8 @@ class ServerProcess
             }
             if (!m_reaped) {
                 int status = 0;
-                while (waitpid(m_pid, &status, 0) < 0 && errno == EINTR) {}
+                while (waitpid(m_pid, &status, 0) < 0 && errno == EINTR) {
+                }
             }
         }
     }
@@ -492,10 +504,10 @@ void runMode(const fs::path &binary, std::string_view mode)
         server.waitReady();
 
         const std::vector<ClientSpec> clients{
-            {101, 1024, Behavior::Fast}, {102, 1024, Behavior::Fast},
-            {103, 1024, Behavior::Fast}, {201, 24, Behavior::Slow},
+            {101, 1024, Behavior::Fast},     {102, 1024, Behavior::Fast},
+            {103, 1024, Behavior::Fast},     {201, 24, Behavior::Slow},
             {202, 16, Behavior::Fragmented}, {203, 32, Behavior::Partial},
-            {204, 8, Behavior::Invalid}, {205, 3, Behavior::Idle}};
+            {204, 8, Behavior::Invalid},     {205, 3, Behavior::Idle}};
         sendConcurrent(port, clients);
         std::map<std::uint32_t, std::uint64_t> expected;
         for (const auto &client : clients) {
@@ -580,13 +592,13 @@ void runMode(const fs::path &binary, std::string_view mode)
         require(logs.find("protocol error") != std::string::npos,
                 "malformed client was not rejected");
         const auto verified = verifyRecords(dataPath, expected);
-        std::cout << "mode=" << mode << " clients=" << expected.size()
-                  << " frames=" << verified << " hot_frames=" << hotCount
-                  << " verified=PASS\n";
+        std::cout << "mode=" << mode << " clients=" << expected.size() << " frames=" << verified
+                  << " hot_frames=" << hotCount << " verified=PASS\n";
     } catch (...) {
         try {
             std::cerr << "Server log (" << mode << "):\n" << logContents(logPath) << '\n';
-        } catch (...) {}
+        } catch (...) {
+        }
         throw;
     }
 }
@@ -601,7 +613,8 @@ int main(int argc, char* argv[])
             return 0;
         }
         if (argc != 4 || std::string_view(argv[2]) != "--mode") {
-            std::cerr << "Usage: telemetry-multi-client-test [--self-test | SERVER --mode process|thread]\n";
+            std::cerr << "Usage: telemetry-multi-client-test [--self-test | SERVER --mode "
+                         "process|thread]\n";
             return 2;
         }
         const fs::path binary = fs::absolute(argv[1]);

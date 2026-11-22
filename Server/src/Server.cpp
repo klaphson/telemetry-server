@@ -136,7 +136,8 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
             break;
         }
 
-        const int ready = epoll_wait(epoll_fd, events.data(), static_cast<int>(events.size()), timeoutMs);
+        const int ready =
+            epoll_wait(epoll_fd, events.data(), static_cast<int>(events.size()), timeoutMs);
 
         if (ready == -1) {
             if (errno == EINTR) {
@@ -155,8 +156,7 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
                     (event.events & (EPOLLERR | EPOLLHUP)) == 0U &&
                     telemetry::ipc::consumeEvent(readerCompletion->fd)) {
                     std::cerr << "[server] reader thread stopped code="
-                              << readerCompletion->result.load(std::memory_order_acquire)
-                              << '\n';
+                              << readerCompletion->result.load(std::memory_order_acquire) << '\n';
                 } else {
                     std::cerr << "[server] reader completion eventfd error\n";
                 }
@@ -420,8 +420,7 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
 
             for (std::size_t index = 0; index < availableFrames; ++index) {
                 const std::span<const std::byte> frame{
-                    client.inputBuffer.data.data() + client.inputBuffer.offset +
-                        index * kFrameSize,
+                    client.inputBuffer.data.data() + client.inputBuffer.offset + index * kFrameSize,
                     kFrameSize};
                 const DecodeResult decoded = decode(frame);
 
@@ -441,9 +440,9 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
             }
 
             if (validFrames != 0) {
-                const std::span<const std::byte> validBytes{
-                    client.inputBuffer.data.data() + client.inputBuffer.offset,
-                    validFrames * kFrameSize};
+                const std::span<const std::byte> validBytes{client.inputBuffer.data.data() +
+                                                                client.inputBuffer.offset,
+                                                            validFrames * kFrameSize};
                 const std::size_t pushed = ring.tryPushBatch(validBytes);
                 client.inputBuffer.offset += pushed * kFrameSize;
                 publishedAny = pushed != 0;

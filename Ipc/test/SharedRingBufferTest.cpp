@@ -8,16 +8,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <array>
 #include <algorithm>
+#include <array>
+#include <cerrno>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <sched.h>
 #include <span>
 #include <vector>
-#include <cerrno>
-#include <cstddef>
-#include <cstdlib>
 
 TEST_CASE("push and pop preserve an exact frame", "[shared_ring]")
 {
@@ -145,8 +145,7 @@ TEST_CASE("batch transfers preserve ordering and reject malformed spans", "[shar
     }};
     std::array<std::byte, 3 * kFrameSize> bytes{};
     std::copy(reinterpret_cast<const std::byte*>(expected.data()),
-              reinterpret_cast<const std::byte*>(expected.data()) + bytes.size(),
-              bytes.begin());
+              reinterpret_cast<const std::byte*>(expected.data()) + bytes.size(), bytes.begin());
 
     REQUIRE(ring.tryPushBatch({bytes.data(), bytes.size() - 1}) == 0);
     REQUIRE(ring.tryPushBatch({}) == 0);
@@ -249,8 +248,8 @@ TEST_CASE("forked producer and consumer transfer batched frames concurrently",
     std::array<Frame, batchFrames> frames{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{10};
     while (sent <= totalFrames && std::chrono::steady_clock::now() < deadline) {
-        const auto count = static_cast<std::size_t>(
-            std::min<std::uint64_t>(batchFrames, totalFrames - sent + 1));
+        const auto count =
+            static_cast<std::size_t>(std::min<std::uint64_t>(batchFrames, totalFrames - sent + 1));
         for (std::size_t i = 0; i < count; ++i) {
             frames[i] = encode(TelemetryRecord{.timestampNs = sent + i});
         }

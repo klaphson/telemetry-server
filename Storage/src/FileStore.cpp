@@ -79,8 +79,7 @@ bool FileStore::appendFrames(std::span<const std::byte> frames)
         }
 
         const std::size_t remainingSegmentBytes = m_config.maxSegmentBytes - m_currentSize;
-        std::size_t chunkBytes =
-            std::min(frames.size() - offset, remainingSegmentBytes);
+        std::size_t chunkBytes = std::min(frames.size() - offset, remainingSegmentBytes);
 
         // Preserve the original frame-level fdatasync cadence. The threshold
         // may be unaligned, so round up to the next complete frame.
@@ -118,8 +117,7 @@ bool FileStore::appendFrames(std::span<const std::byte> frames)
         m_currentSize += chunkBytes;
         m_unsyncedBytes += chunkBytes;
 
-        if (m_config.syncEveryBytes != 0 &&
-            m_unsyncedBytes >= m_config.syncEveryBytes) {
+        if (m_config.syncEveryBytes != 0 && m_unsyncedBytes >= m_config.syncEveryBytes) {
             if (!sync()) {
                 return false;
             }

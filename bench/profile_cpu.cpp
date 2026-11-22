@@ -17,10 +17,10 @@
 #include <iostream>
 #include <iterator>
 #include <sstream>
-#include <system_error>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -131,7 +131,6 @@ std::string readFile(const fs::path &path)
     return {std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
 }
 
-
 class NativeBinaries
 {
   public:
@@ -166,16 +165,26 @@ class NativeBinaries
     NativeBinaries(const NativeBinaries &) = delete;
     NativeBinaries &operator=(const NativeBinaries &) = delete;
 
-    [[nodiscard]] const fs::path &server() const { return m_server; }
-    [[nodiscard]] const fs::path &sender() const { return m_sender; }
-    [[nodiscard]] const fs::path &directory() const { return m_dir; }
+    [[nodiscard]] const fs::path &server() const
+    {
+        return m_server;
+    }
+    [[nodiscard]] const fs::path &sender() const
+    {
+        return m_sender;
+    }
+    [[nodiscard]] const fs::path &directory() const
+    {
+        return m_dir;
+    }
 
   private:
     static void copyExecutable(const fs::path &source, const fs::path &destination)
     {
         fs::copy_file(source, destination, fs::copy_options::none);
-        fs::permissions(destination, fs::perms::owner_exec | fs::perms::group_exec |
-                                         fs::perms::others_exec, fs::perm_options::add);
+        fs::permissions(destination,
+                        fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                        fs::perm_options::add);
     }
 
     fs::path m_dir;
@@ -214,8 +223,8 @@ void validateReport(const fs::path &path)
             "Check report.txt, perf buildid-list and the native executable copies. "
             "Docker Desktop VirtioFS may hide build IDs.");
     }
-    std::cout << "CPU hotspot rows with symbols: " << resolved
-              << ", unresolved: " << unresolved << '\n';
+    std::cout << "CPU hotspot rows with symbols: " << resolved << ", unresolved: " << unresolved
+              << '\n';
 }
 
 std::string tail(const fs::path &path)
@@ -402,8 +411,8 @@ void selfTest()
             if (!rejected)
                 throw std::runtime_error("incorrect frame count was accepted");
         }
-        const fs::path executable = path.parent_path() /
-                                    ("telemetry-profiler-probe-" + std::to_string(getpid()));
+        const fs::path executable =
+            path.parent_path() / ("telemetry-profiler-probe-" + std::to_string(getpid()));
         {
             std::ofstream out(executable);
             out << "test executable\n";
@@ -535,16 +544,16 @@ void runProfile(const Options &o, const fs::path &executable)
                     runCommand({o.perf, "buildid-cache", "--add", binary.string()},
                                o.output / (binary.filename().string() + "-buildid.log"), 30);
                 } catch (const std::exception &error) {
-                    std::cerr << "Warning: could not cache symbols for " << binary
-                              << ": " << error.what() << '\n';
+                    std::cerr << "Warning: could not cache symbols for " << binary << ": "
+                              << error.what() << '\n';
                 }
             }
             const fs::path report = o.output / "report.txt";
             // Aggregate Server and Reader CPU samples across all runs, but
             // exclude Python and telemetry-load from this hotspot table.
-            runCommand({o.perf, "report", "--stdio", "--no-children", "-g", "none", "-n",
-                        "--comms", "telemetry-serve", "--percentage", "relative",
-                        "--sort", "dso,symbol", "-i", data.string()},
+            runCommand({o.perf, "report", "--stdio", "--no-children", "-g", "none", "-n", "--comms",
+                        "telemetry-serve", "--percentage", "relative", "--sort", "dso,symbol", "-i",
+                        data.string()},
                        report, 60);
             std::cout << "Top CPU hotspots (Server + Reader; not Python):\n";
             validateReport(report);
