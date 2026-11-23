@@ -72,6 +72,15 @@ if(BUILD_TESTING)
             PROPERTIES TIMEOUT 15)
     endforeach()
 
+    # Genuine ENOSPC: only a private or explicitly authorized small tmpfs.
+    add_executable(telemetry-storage-enospc-test tests/storage_enospc.cpp)
+    target_link_libraries(telemetry-storage-enospc-test PRIVATE
+        Storage Protocol telemetry_build_options Threads::Threads)
+    add_test(NAME telemetry_storage_recovery_enospc
+        COMMAND $<TARGET_FILE:telemetry-storage-enospc-test>)
+    set_tests_properties(telemetry_storage_recovery_enospc PROPERTIES
+        TIMEOUT 20 SKIP_RETURN_CODE 77 RESOURCE_LOCK telemetry_enospc_mount)
+
     # Process lifetime and fault-injection checks run as an isolated C++20 tool.
     add_executable(telemetry-process-failure-test tests/process_failure.cpp)
     target_link_libraries(telemetry-process-failure-test PRIVATE
