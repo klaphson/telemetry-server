@@ -484,10 +484,786 @@ ctest --test-dir build -R '^telemetry_storage_recovery_' --output-on-failure
 
 `RLIMIT_FSIZE` tests the short-write/error path deterministically; **`EFBIG`
 from a file-size limit is not `ENOSPC` from an actually full filesystem**.
-An ENOSPC integration test still needs a controlled, capacity-limited volume.
-These checks simulate process failure, not power failure. `fdatasync()`
-returns success on the test filesystem, but the tests cannot guarantee its
-behavior during sudden power loss or storage hardware faults.
+
+### Genuine ENOSPC on an isolated tmpfs
+
+`telemetry_storage_recovery_enospc` tests a real filesystem-full condition.
+`tests/storage_enospc.cpp` creates a private mount namespace and a 512 KiB
+`tmpfs`, fills it until `write()` returns `ENOSPC`, and verifies that
+`FileStore` reports failure rather than silently accepting a partial batch.
+It then deletes only its own filler file, reopens the stored telemetry, checks
+that only an incomplete tail was removed, and verifies all surviving records
+and a new appended frame byte-for-byte. The test never fills shared `/dev/shm`,
+`/tmp`, or the service's data volume.
+
+If Linux user/mount namespaces are disabled (for example by Docker security
+settings), the executable returns **77** and CTest marks it **Skipped**, not
+Passed. To run it without user namespaces, provide an **empty, dedicated,
+size-limited tmpfs mount** to the devcontainer and use the environment variable
+`TELEMETRY_ENOSPC_DIR=/path/to/dedicated/tmpfs`. The test validates that the
+path is a separate `tmpfs` mount with capacity at most 1 MiB; a normal disk,
+`/dev/shm`, or an unsafe large mount is rejected. A temporary Compose override
+can mount `tmpfs` at `/tmp/telemetry-enospc` with `size=524288`, for example.
+
+```bash
+make storage-recovery-test
+# Optional: test with a dedicated mount when namespaces are unavailable:
+TELEMETRY_ENOSPC_DIR=/tmp/telemetry-enospc ctest --test-dir build \
+  -R '^telemetry_storage_recovery_enospc
+
+## Tests
+
+Stop any server using port 9000 before running:
+
+```bash
+make test
+```
+
+Or, after building:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Catch2 unit tests cover:
+
+- CLI configuration: defaults, runtime options, invalid ports, malformed numbers
+  and overflow, undersized or unaligned segments, sync intervals larger than the
+  segment (including the default interval), unknown options and positional
+  arguments, missing values for every option, and empty data paths. Tests check
+  error status and diagnostics, plus valid port and storage boundaries, both
+  storage-option orders, disabled syncing, and both help flags.
+- The binary codec: known wire bytes, integer boundaries, exact floating-point
+  bits, truncated and oversized input, invalid headers, unaligned input, and
+  error descriptions.
+- Client buffer compaction and preservation of unread bytes.
+- Shared ring frame preservation, visibility across `fork()`, and draining after
+  producer closure.
+- File storage: exact bytes and size after appending two frames, removal of
+  an incomplete trailing frame on open, and rotation before a third frame exceeds
+  a two-frame segment limit, checking the active and archived file sizes.
+- Server backpressure: pause/resume, exact binary frame preservation, partial
+  frames across a pause, stopping before the next receive, shutdown, and error
+  propagation, using a shared ring, eventfds, and nonblocking socket pairs.
+  Tests also check batched data-ready notifications, incomplete TCP frames,
+  valid frames before protocol errors, buffered frames on half-closed clients
+  during backpressure, and eventfd error handling.
+- Server signals: empty input, repeated shutdown requests, reader termination
+  while running or draining, nonterminal reader events, unrelated signals and
+  child PIDs, batched notifications, and reader-failure precedence over shutdown.
+
+These unit tests do not bind port 9000. Run all Catch2 tests with:
+
+```bash
+ctest --test-dir build -R '^(ConfigParserTest|TelemetryCodecTest|FileStoreTest|SharedRingBufferTest|BufferTest|ServerBackpressureTest|ServerSignalTest)\.' --output-on-failure
+```
+
+Run just the CLI configuration tests after building:
+
+```bash
+ctest --test-dir build -R '^ConfigParserTest\.' --output-on-failure
+```
+
+`Protocol` and its codec tests are already included by the root CMake setup.
+Run just the codec tests after building:
+
+```bash
+ctest --test-dir build -R '^TelemetryCodecTest\.' --output-on-failure
+```
+
+Run just the storage tests after building:
+
+```bash
+ctest --test-dir build -R '^FileStoreTest\.' --output-on-failure
+```
+
+Run just the signal tests after building:
+
+```bash
+ctest --test-dir build -R '^ServerSignalTest\.' --output-on-failure
+```
+
+CMake uses an installed Catch2 3 package when available; otherwise it downloads
+Catch2 v3.8.1 during configuration, which requires network access. Configure with
+`-DBUILD_TESTING=OFF` to build without tests or Catch2.
+
+The test suite includes Catch2 cases, process and threaded smoke tests,
+and Python benchmark harness checks. CTest runs the native C++20 multiclient
+TCP tests in both Reader modes regardless of Python availability.
+Coverage gaps still include merged child-state notifications, unexpected parent
+death, and unread-frame preservation during paused disconnects.
+
+The Bash smoke test sends a fragmented binary frame followed by another frame,
+checks decoded reader output, then terminates the reader to verify that the parent
+reports failure and the terminating signal. The graceful-shutdown test first
+stops and continues the reader to verify nonterminal child notifications. It then
+sends a valid frame, waits for its output, sends `SIGTERM`, and checks the drain
+messages, reader EOF, and successful process exit. It uses a temporary data path
+and checks that the file contains exactly 32 bytes after shutdown. Additional runs
+verify that killing an idle reader fails without further traffic and that a
+storage-open failure reports the reader's exit code. Process-exit waits are bounded
+even when the script runs outside CTest. Cleanup removes the temporary file.
+The smoke test uses the default data path,
+so it creates or appends to `telemetry.bin` in its working directory (`build`
+when run through the CTest command above).
+
+The process tests require Linux `/proc`, Bash TCP redirection, `stat -c` support,
+and a free port 9000. CTest gives each a 15-second timeout and a shared resource
+lock so they do not run concurrently. To check for intermittent process or
+logging failures:
+
+```bash
+ctest --test-dir build --output-on-failure \
+    -R '^telemetry_(process_smoke|graceful_shutdown)$' --repeat until-fail:100
+```
+
+## Process lifetime and fault injection (Stage 26)
+
+On Linux, process mode sets `PR_SET_PDEATHSIG` to `SIGKILL` in the
+forked Reader and checks `getppid()` immediately afterward to close the
+fork-to-prctl race. If the Server parent dies unexpectedly, the Reader
+is terminated instead of remaining indefinitely blocked on `eventfd`.
+**This is an emergency containment mechanism, not a durability guarantee:**
+a killed Reader can lose data not yet synced to the filesystem.
+
+On normal process-mode shutdown, the Server closes the producer, wakes
+Reader and waits for its final flush/sync. Waiting for the Reader is
+now bounded at 10 seconds; on timeout, the parent sends `SIGKILL`,
+tries to reap the child for up to another 2 seconds, then returns failure.
+A Reader stuck in uninterruptible kernel I/O may remain unreaped until
+that I/O resolves; the Server must not block indefinitely on it.
+The 10-second bound is a failure policy, not a guarantee of successful
+storage synchronization. A slow or stalled disk could trigger it.
+The experimental `--reader-mode thread` still uses `std::jthread::join()`
+and does **not** have an equivalent hard timeout; forcefully cancelling
+an arbitrary C++ thread would be unsafe.
+
+The C++20 `tests/process_failure.cpp` harness runs five scenarios,
+each with a temporary data directory, an ephemeral TCP port, a bounded
+wait, and process-group cleanup on failure:
+
+- `reader-killed`: kill Reader with SIGKILL, ensure Server fails;
+- `parent-killed`: kill Server with SIGKILL, ensure Reader no longer
+  runs (a zombie awaiting reaping by the container's init is acceptable);
+- `stopped-reader-timeout`: stop Reader with SIGSTOP, request SIGTERM
+  and check bounded failure instead of an infinite `waitpid()`;
+- `graceful-process` / `graceful-thread`: transmit 256 frames, shut
+  down cleanly, and verify byte-exact persisted records and Reader EOF.
+
+```bash
+make process-failure-test
+ctest --test-dir build -R '^telemetry_process_failure_' --repeat until-fail:5 \
+    --output-on-failure
+```
+
+These tests are Linux-specific and depend on `/proc` and normal POSIX
+signals. Run them in the development container, not against the deployed
+service. Readers exiting unexpectedly and SIGCHLD stop/continue are also
+covered by existing smoke and Catch2 signal tests. The tests do not
+simulate a power cut, filesystem corruption, uninterruptible kernel
+I/O or all possible combined signal-delivery races.
+
+## Multi-client TCP integration tests (Stage 25)
+
+The native C++20 executable `telemetry-multi-client-test`, implemented in
+`tests/multi_client_tcp.cpp`, exercises concurrent loopback clients
+against the **unmodified** Server/Reader binary in both
+`--reader-mode process` and `--reader-mode thread`. It checks:
+
+- Three concurrent fast clients and deliberately slow, fragmented, and idle
+  senders, with per-client sequence numbers and sensor IDs.
+- A client that disconnects after a truncated final frame; only its complete
+  frames must be stored.
+- A client with an invalid 32-byte protocol frame, followed by another
+  valid connection to prove that one bad client does not stop the server.
+- A sustained sending client alongside a short fragmented probe: the probe
+  must appear in the data file **while** fast traffic continues, and the fast
+  client must continue making progress afterward.
+- Graceful shutdown and byte-exact verification of **every persisted frame**.
+
+The global order among connections is intentionally unconstrained.
+TCP guarantees ordering *within* a connection only; the verifier checks
+that each sensor's sequence is strictly increasing without missing or
+duplicate records. Scenarios are bounded by timeouts, use a temporary
+storage directory and an ephemeral loopback port, and kill the test's
+process group if the server fails.
+
+```bash
+make multi-client-test
+# or after make build:
+ctest --test-dir build -R '^telemetry_multi_client_' --output-on-failure
+```
+
+The native `--self-test` validates the data-file verifier without
+starting a server. The integration suite is compiled and linked against
+the real C++20 Protocol codec, using `std::jthread`, `std::barrier` and
+POSIX sockets instead of Python. It requires no Python interpreter.
+The integration tests confirm progress under this
+particular bounded workload; **they do not mathematically prove starvation
+freedom under arbitrary continuous traffic**. Other process-failure and
+large-scale overload tests belong to later roadmap stages.
+
+## Docker development
+
+The included Dockerfile provides the Linux compiler and debugging tools. Start
+and enter the development container from the host:
+
+```bash
+make docker-shell
+```
+
+Inside the container, the repository is mounted at `/workspace`:
+
+```bash
+make run
+```
+
+The image also creates the `telemetry` user and group and prepares
+`/var/lib/telemetry-server` with mode `0750`, owned by that account. To run as this
+user with persistent storage, use the following instead of `make run` inside the
+container's root shell:
+
+```bash
+make run-service
+```
+
+Compose mounts the `telemetry-data` named volume at `/var/lib/telemetry-server`,
+so the active data file and archived segments written by `make run-service`
+persist across container recreation. `make run` uses `telemetry.bin` in the
+mounted checkout by default. Both commands run in the foreground; stop the
+server with Ctrl+C before switching between them.
+
+```bash
+docker compose exec dev bash
+```
+
+The Compose configuration does not publish port 9000 to the host, so run the
+telemetry example inside the container. Run `make test` there after stopping the
+server. `make docker-build` builds the image; `make docker-run` builds and runs
+the application in a temporary container.
+
+The `.devcontainer` configuration also supports opening the project in the
+provided development container.
+
+The image includes the Docker CLI, Compose, and Buildx. Compose mounts the
+host's `/var/run/docker.sock` into the development container, so Docker commands
+inside it operate on the host's Docker engine and existing containers:
+
+```bash
+docker ps
+docker compose version
+docker buildx version
+```
+
+If an existing container reports `docker: command not found`, run
+`bash .devcontainer/setup.sh` inside it to install the missing Docker CLI,
+Compose, and Buildx. Check access to the host engine with `docker ps`.
+
+After changing the Dockerfile or socket mount, use **Dev Containers: Rebuild
+Container** in VS Code. Bind mount source paths passed to Docker are resolved
+on the host; `/workspace` is the path inside the development container. Run
+the project's `docker compose up` and `make docker-shell` commands from the host
+so that the relative repository mounts resolve correctly.
+
+VS Code extensions and server settings are stored in
+`.devcontainer/.local/vscode-server/`; Codex configuration, plugins, and skills
+are stored in `.devcontainer/.local/codex/`. Compose mounts these host directories
+at `/root/.vscode-server` and `/root/.codex`, so their contents survive container
+rebuilds. The local directories are excluded from Git and the Docker build
+context. Keep them to retain your installed extensions and plugins.
+
+When applying this configuration to an existing container for the first time,
+run the following inside that container before rebuilding. Skip this step if
+the directories are already mounted:
+
+```bash
+mkdir -p .devcontainer/.local/vscode-server .devcontainer/.local/codex
+cp -a /root/.vscode-server/. .devcontainer/.local/vscode-server/
+tar -C /root/.codex --exclude=./ipc --exclude=./.tmp -cf - . \
+    | tar -C .devcontainer/.local/codex -xf -
+```
+
+Then use **Dev Containers: Rebuild Container** in VS Code.
+
+## Run as a systemd service
+
+The unit in `packaging/systemd/telemetry-server.service` runs the server as the
+`telemetry` user and group, with the executable at
+`/usr/local/bin/telemetry-server`. Use these commands on a Linux host running
+systemd, from the repository root. Stop any other server using port 9000 first.
+
+Build a release executable without the test dependencies:
+
+```bash
+cmake -S . -B build-release -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF
+cmake --build build-release
+```
+
+Create the service account once (skip this step if it already exists):
+
+```bash
+sudo useradd --system --user-group --no-create-home \
+    --home-dir /var/lib/telemetry-server --shell /usr/sbin/nologin telemetry
+```
+
+Install the executable and unit, then enable the service at boot and start it:
+
+```bash
+sudo install -m 0755 build-release/telemetry-server /usr/local/bin/telemetry-server
+sudo install -m 0644 packaging/systemd/telemetry-server.service \
+    /etc/systemd/system/telemetry-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now telemetry-server.service
+```
+
+The unit uses port 9000, 64 MiB segments, and a 1 MiB sync interval. systemd
+creates `/var/lib/telemetry-server` with mode `0750`, owned by the service
+account. The reader writes `telemetry.bin` and its archived segments there.
+The unit applies a `0027` umask and restricts filesystem writes using
+`ProtectSystem=strict`; its state directory remains writable. If you change the
+data path, also adjust the unit's writable-directory settings and permissions.
+
+Inspect service status and follow the server and reader logs:
+
+```bash
+sudo systemctl status telemetry-server.service
+sudo journalctl -u telemetry-server.service -f
+```
+
+The unit restarts the application after failures with a two-second delay.
+To stop it, allowing up to 30 seconds for shutdown:
+
+```bash
+sudo systemctl stop telemetry-server.service
+```
+
+After editing the installed unit, run `sudo systemctl daemon-reload` followed by
+`sudo systemctl restart telemetry-server.service`. To update the executable,
+stop the service, repeat the executable installation command, and start it with
+`sudo systemctl start telemetry-server.service`.
+
+## Batched Reader storage writes
+
+The Reader now stages up to **64 KiB (2048 telemetry frames)** and passes
+complete frames to `FileStore::appendFrames()`. Under sustained load, this
+can replace thousands of 32-byte `write()` calls with a few larger writes.
+The Reader also flushes smaller, partially filled batches before waiting on
+`eventfd`, so a slow or stopped sender does not leave data stranded in memory.
+
+`FileStore` splits incoming batches at the configured segment boundary
+and durability threshold. It still rotates only **before** a new frame would
+exceed the segment limit and preserves `fdatasync()` after the configured
+number of bytes (rounded to complete frames). Existing `appendFrame()` calls
+remain supported.
+
+To measure the effect, compare the same workload on the base commit and
+this branch using `make benchmark-matrix` (without `strace`). Then run
+`make profile-syscalls` with tracing to compare the number of Reader
+`write()` calls, not throughput under tracing. Actual batch sizes depend
+on how much data is waiting in the shared ring when Reader drains it.
+
+## Experimental Reader thread
+
+The default `--reader-mode process` runs Reader in a child. On Linux,
+`--reader-mode thread` runs Reader in a `std::jthread` while Server keeps
+its epoll loop in the main thread.
+
+```bash
+./build/telemetry-server --reader-mode thread --data-file telemetry-thread.bin
+```
+
+Both modes use the same shared ring, IPC batches, backpressure thresholds,
+and FileStore. In thread mode, Reader publishes its exit code atomically
+and signals an eventfd registered in Server's epoll instance. An early Reader
+exit stops Server with failure. On normal shutdown, main closes the producer
+side of the ring, wakes Reader to finish writing and syncing, then joins it.
+The process owns the ring and eventfds until Reader has joined.
+
+Build a single Release binary with `make benchmark-build` and compare both modes
+with the same workload. Use separate CSV paths to keep both results.
+
+```bash
+bash bench/run_benchmark.sh 1000000 128 19000 --reader-mode process --repeat 5 \
+  --csv build-bench/reader-process.csv
+bash bench/run_benchmark.sh 1000000 128 19000 --reader-mode thread --repeat 5 \
+  --csv build-bench/reader-thread.csv
+```
+
+The benchmark checks the order and contents of persisted frames in both modes.
+The thread shares the failure domain of the Server process.
+
+## TCP end-to-end benchmark
+
+The optional benchmark generates 32-byte telemetry frames using the existing
+`Protocol::encode()` and sends them through loopback TCP. After storage and
+graceful shutdown, it checks **every record**, including magic, version, size,
+sensor, metric, sequential timestamp and value. Verification occurs after
+the measured interval, so it does not inflate the throughput timing.
+
+The Linux runner uses `inotify` for file-change notifications and `pidfd`
+(if available) to detect process exit. It also checks the file size at least
+every 100 ms because Docker Desktop host-mounted filesystems may fail to
+deliver inotify notifications. When notifications work, no polling delay
+is added. Unlike the previous shell loop, there is no mandatory 50 ms sleep
+after each notification. Startup occurs before
+the timed interval; the end-to-end measurement includes sender startup,
+TCP, Server/Reader processing, shutdown and final synchronization.
+
+Build Release binaries and run the default experiment:
+
+```bash
+make benchmark
+```
+
+Run one custom experiment using the existing arguments (frames, batch, port):
+
+```bash
+bash bench/run_benchmark.sh 500000 128 19000
+```
+
+To run three repeats for each batch size and export the individual results:
+
+```bash
+bash bench/run_benchmark.sh 500000 128 19000 \
+  --batches 1,32,128,512 --repeat 3 \
+  --csv build-bench/benchmark_results.csv
+```
+
+Or use `make benchmark-matrix`. After every batch, the runner prints
+median, minimum and maximum throughput across that batch's repeated runs.
+The CSV stores one row per completed run; it is overwritten when another
+invocation uses the same path. Build output and results under `build-bench/`
+are Git-ignored. The run limit is 1,000,000 frames (32 MB), under the
+default segment rotation threshold.
+
+The `--quiet` option disables per-record stdout logging, not errors or
+lifecycle logs. The script checks persisted frame contents and Reader EOF.
+`sender_frames_per_second` measures delivery into TCP, whereas
+`end_to_end_frames_per_second` measures the whole pipeline and shutdown.
+The tests depend on standard-library Python 3 and Linux inotify; no extra
+Python packages are necessary.
+
+Run `make benchmark-test` for Python correctness tests. CTest also includes
+them when Python 3 is available. Repeat measurements under comparable
+host load; Docker Desktop and `strace` introduce measurement overhead.
+
+## Profiling system calls with strace
+
+The syscall profiler answers **which syscalls the Server and Reader perform
+and how often**. It traces the parent and its forked child separately, without
+changing the C++ application:
+
+```bash
+make profile-syscalls
+```
+
+The target builds the same Release binaries as the benchmark and runs a
+**10,000-frame** workload (default batch 128 on TCP port 19000). A small workload
+keeps detailed per-process traces manageable. Customize it:
+
+```bash
+python3 bench/profile_syscalls.py --frames 20000 --batch 128 \
+  --port 19000 --output build-bench/syscall-profile
+```
+
+The profiler starts Server and Reader normally, **then attaches strace**
+to both process PIDs before sending data. This avoids tracing the initial
+fork and makes it easier to diagnose whether tracing changes startup
+behavior. The flags `-ff -T -s 0 -yy` write separate `trace.<PID>`
+files for Server and Reader; `-T` adds elapsed wall time to each
+completed syscall. The summary includes per-process call and error counts,
+saved to `syscalls.csv`. The profiler also checks the original order
+and exact contents of persisted frames.
+
+For reliable file notifications inside Docker Desktop, the profiler writes
+temporary telemetry data to a native Linux directory under `/tmp` instead
+of the host-mounted `/workspace`. It removes those temporary telemetry bytes
+when finished, but **retains** `trace.<PID>`, `server.log`, `strace.log`
+and `syscalls.csv` under `build-bench/syscall-profile/`. This means
+syscall counts remain useful, but storage latency is not directly comparable
+to benchmark runs using a different filesystem.
+
+The script prints each PID, confirms successful attachment to **both**
+processes and displays the trace directory. `--timeout 90` allows a
+longer storage wait for slow hosts. An unsuccessful run keeps raw trace files
+and shows the most recent syscalls, process states and strace messages
+directly in the terminal, so failures are easier to debug.
+
+Outputs:
+
+```text
+build-bench/syscall-profile/server.log
+build-bench/syscall-profile/strace.log
+build-bench/syscall-profile/trace.<server PID>
+build-bench/syscall-profile/trace.<reader PID>
+build-bench/syscall-profile/syscalls.csv
+```
+
+Read the results by comparing **call counts**: after the 64 KiB
+Reader batching optimization, Reader `write` calls should be far fewer
+than the number of stored frames. The exact count depends on occupancy
+of the shared ring, rotation and sync boundaries. Server `recvfrom`
+calls correspond to socket reads. `read` also includes eventfd/signalfd activity,
+and `write` can include lifecycle logs; inspect the trace's file
+descriptor paths (`-yy`) when in doubt.
+
+**Do not interpret `elapsed_seconds` as CPU time.**
+`-T` measures wall time inside a syscall, so blocking
+`epoll_wait()` or `eventfd_read()` may appear
+expensive even when the process is sleeping. `strace` perturbs
+scheduling and performance, so never compare throughput under strace with
+the normal benchmark. Use `perf` later for CPU hotspots.
+
+The Ubuntu devcontainer's Dockerfile includes `strace`, and Compose
+adds `SYS_PTRACE` and `seccomp=unconfined`. If
+`strace` reports `Operation not permitted`,
+rebuild/recreate the development container with the current Compose
+configuration. Do not grant tracing privileges to the production service.
+
+Unit-test the profiler's parser with:
+
+```bash
+make benchmark-test
+```
+
+## IPC batching: default and only production path
+
+Server and Reader always use batched SPSC ring transfers. The Server
+validates complete TCP frames and publishes the valid prefix using
+`tryPushBatch()`; the Reader retrieves up to 4 KiB at a time through
+`tryPopBatch()`, then stages up to 64 KiB for file writes. A batch
+returns its actual number of frames, which may be smaller than requested.
+
+Batch methods copy at most two contiguous ranges across the wrap boundary
+and publish or release the entire batch through a single atomic
+`memory_order_release` store. The opposite process reads the index with
+`memory_order_acquire`. This ring is strictly single-producer,
+single-consumer (SPSC).
+
+The low-level single-frame `tryPush()` and `tryPop()` API remains
+available for unit tests, but production Server and Reader do not select
+a scalar mode. There is no CMake option for scalar IPC.
+
+The original five-run comparison measured medians of **14.60 million
+frames/s** for batched IPC and **11.11 million frames/s** for scalar IPC.
+Two further five-run measurements with the simplified, batched-only
+version reached medians of **14.09** and **13.83 million frames/s**.
+All 20 runs verified the persisted frame count and ordering. Performance
+varies with host load and scheduling; these results are not guarantees.
+
+Run a batched-only repeatable benchmark:
+
+```bash
+make benchmark-ipc
+```
+
+The output is saved in `build-ipc-results/batched.csv`. Existing
+`make benchmark-matrix` remains available for TCP sender batch-size
+comparisons. Tests cover partial batches, wraparound, full ring,
+single-frame API interoperation and forked SPSC ordering, including
+Server rejection of a full ring and notification after partial publication.
+
+## CPU profiling with a separate C++20 controller and Linux perf
+
+**Profiling** means measuring where a running program spends CPU time,
+rather than only how long the whole workload takes. Unlike `strace`,
+which counts Linux system calls, `perf record` samples executing code
+and can identify expensive C++ functions.
+
+`bench/profile_cpu.cpp` executable controls the standard Linux
+`perf` tool. It does **not** insert timers or instrumentation into
+Server, Reader or FileStore, and it is **not** linked into
+`telemetry-server`.
+
+The profiler uses **temporary native Linux copies** of the Server and sender binaries,
+which avoids symbol-resolution failures observed on Docker Desktop VirtioFS.
+The original build files and production code stay unchanged. The copies are
+removed after profiling; `perf buildid-cache` keeps symbols for later review.
+
+The sequence is:
+
+```text
+telemetry-profile-cpu (C++20 controller)
+    |
+    +-- perf record (sample CPU)
+          |
+          +-- python3 bench/run_benchmark.py (existing workload only)
+                |
+                +-- telemetry-load (TCP sender)
+                +-- telemetry-server (parent)
+                      +-- Reader (forked child)
+    |
+    +-- validate the existing benchmark's CSV results
+    +-- perf report --stdio (CPU hotspots by PID and symbol)
+```
+
+The Python script above is **only the existing benchmark and data
+verification harness**. The new profiler orchestration, process
+spawning, timeouts and report validation are C++20. The controller uses
+`posix_spawnp()` to start tools, `waitpid()` to monitor them,
+a separate process group to terminate timed-out workloads, and C++20
+`std::filesystem`, `std::chrono`, and `std::from_chars`.
+
+`perf record` inherits profiling for child processes by default.
+That includes Server and Reader. Its report is separated by
+**PID (process identifier)**, library and function name. The recording also includes the sender and Python benchmark, but the
+**hotspot report filters to `telemetry-serve`** (Linux's 15-character process
+name for `telemetry-server`) and aggregates samples across benchmark runs.
+The percentages are relative to the filtered Server and Reader CPU samples,
+not to wall time. Counter mode (`--mode stat`) still measures the entire
+process tree, including Python.
+
+To compile and run a test that requires no `perf` permissions:
+
+```bash
+make profile-cpu-test
+```
+
+The development image includes `linux-tools-generic` and exposes its actual
+`perf` binary in `/usr/local/bin`. Rebuild the devcontainer after updating
+the Dockerfile. To repair an existing Ubuntu development container without
+rebuilding, run as root:
+
+```bash
+apt-get update
+apt-get install -y --no-install-recommends linux-tools-generic
+perf_bin="$(find /usr/lib/linux-tools -name perf -print | sort -V | tail -n 1)"
+test -x "$perf_bin" && ln -s "$perf_bin" /usr/local/bin/perf
+perf --version
+```
+
+Ubuntu's `/usr/bin/perf` launcher selects tools using the running kernel's
+version. Docker Desktop uses a LinuxKit kernel, so that launcher can report
+`perf not found for kernel ...` even after installation. The symlink above
+bypasses the launcher; the sampling check below verifies whether the
+packaged binary works with the host kernel. Alternatively, pass the actual
+binary path with `telemetry-profile-cpu --perf /path/to/perf --check`.
+
+Then check whether the kernel permits sampling:
+
+```bash
+make profile-cpu-check
+```
+
+If it prints `perf sampling check: OK`, capture CPU samples:
+
+```bash
+make profile-cpu
+```
+
+The default run records 20 verified workloads of 1,000,000 frames each,
+with TCP batch size 128. Custom command:
+
+```bash
+./build-perf/telemetry-profile-cpu --frames 500000 --batch 128 --repeat 5
+./build-perf/telemetry-profile-cpu --mode stat --frames 1000000 --repeat 10
+./build-perf/telemetry-profile-cpu --help
+```
+
+The separate `build-perf/` CMake build uses Release optimizations and
+adds `-g -fno-omit-frame-pointer` so `perf` can resolve function
+names and stack frames. This does not change the normal Release build.
+
+Files are written into `build-perf/cpu-profile/`:
+
+- `perf.data`: binary sample recording
+- `report.txt`: filtered, relative CPU hotspot report grouped by DSO and C++ symbol (with sample counts)
+- `record.log`: output from the benchmark wrapped by `perf`
+- `record_runs.csv`: fully validated benchmark runs
+- `check.log`: kernel permission-check diagnostics
+- `telemetry-server-buildid.log` and `telemetry-load-buildid.log`: symbol cache diagnostics
+- `stat.txt`, `stat_runs.csv`: optional CPU counters in `--mode stat`
+
+**Important limitations:** `perf` is an external Linux tool, not
+implemented from scratch in C++. Linux `perf_event_open()` may be
+blocked by the kernel used by Docker Desktop even for root; this is
+not solved by changing the programming language. Install the
+kernel-matched `perf` / `linux-tools` package on native Linux if
+needed. Do **not** grant extra privileges to a production service
+to make development profiling work.
+
+Samples are statistical, not exact per-function timings. The profiler
+rejects reports without named telemetry-server functions; if this happens,
+inspect `report.txt` and `perf buildid-list -i build-perf/cpu-profile/perf.data`.
+For more detailed investigation, inspect the raw file using `perf report`.
+A separate CPU profile recorded over the whole tree can include Python, but
+the generated `report.txt` filters it out.
+Profiling can
+change scheduling; use `make benchmark-matrix` rather than `perf` for
+throughput comparisons. `--mode both` performs two **separate**
+workloads for sampling and counters.
+
+## Formatting and Git hooks
+
+C++ formatting uses clang-format 18 and the repository's `.clang-format`.
+The development image includes clang-format and pre-commit. Rebuild an existing
+Compose container from the host to install them:
+
+```bash
+docker compose up -d --build dev
+```
+
+For native Ubuntu development, install `clang-format-18` and `pre-commit` with
+`apt-get install`. Inside the development container (or your native Linux checkout):
+
+```bash
+make hooks    # Install the Git pre-commit hook once per checkout
+make format   # Format all tracked C/C++ files
+```
+
+Dev Containers check for `pre-commit`, `clang-format-18`, `nano`, `bash-completion`,
+the Docker CLI, Compose, and Buildx
+and install any missing tools when created, on every container start, and whenever VS Code
+attaches. The setup also reinstalls the Git hook each time, so reopening VS Code
+or rebuilding the container keeps it ready. Packages are installed only when
+missing. The setup also configures nano as Git's editor, and the image and Bash
+configuration set `EDITOR`, `VISUAL`, and `GIT_EDITOR` to `nano`, so commit message
+editing works after container rebuilds. Run Git commits in the environment where
+the tools and hook were installed.
+The setup also refreshes `~/.bashrc` from `docker/bashrc`, which loads Bash and
+Git tab completion in interactive terminals. Keep shell customizations in
+`docker/bashrc` so they survive restarts and rebuilds. After setup repairs an
+existing container, open a new terminal or run `source ~/.bashrc` in the current
+one to load completion.
+The hook formats staged C/C++ files before each commit. If it changes files,
+review and stage those changes, then commit again. `make format` also exits with
+a nonzero status when it changes files; run it again to confirm formatting passes.
+
+## Observe the processes
+
+While the application runs, use a second Linux terminal:
+
+```bash
+ps -ef --forest | grep telemetry-server
+cat /proc/<PID>/status
+ls -l /proc/<PID>/fd
+```
+
+To trace process creation and waiting, start the application under `strace`:
+
+```bash
+strace -f -e trace=process ./build/telemetry-server
+```
+
+## C++ note: `[[nodiscard]]`
+
+`Buffer::empty()` and `Buffer::pendingBytes()` use
+`[[nodiscard]]` to warn when a caller ignores their results:
+
+```cpp
+const bool isEmpty = buffer.empty();
+```
+
+The attribute does not change runtime behavior. An explicit cast to `void`,
+such as `(void)buffer.empty()`, indicates an intentionally discarded result.
+ --output-on-failure -V
+```
+
+These tests simulate process failure or a full filesystem, **not power loss**.
+A successful `fdatasync()` / directory `fsync()` is the operating system's
+contract at the relevant boundary; neither test can prove behavior of storage
+hardware, caches or filesystems during sudden power loss.
 
 ## Tests
 
