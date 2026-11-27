@@ -132,6 +132,32 @@ TEST_CASE("FileStore appends binary telemetry frames")
                        bytes.begin() + static_cast<std::ptrdiff_t>(kFrameSize)));
 }
 
+TEST_CASE("FileStore metrics distinguish writes from sync across rotation")
+{
+    using namespace telemetry::protocol;
+    TemporaryDirectory directory;
+    const auto path = directory.file("metrics.bin");
+    FileStore store{FileStoreConfig{.maxSegmentBytes = 2 * kFrameSize, .syncEveryBytes = 0}};
+    const Frame frame = encode(TelemetryRecord{1, 2, 3, 4.0});
+
+    REQUIRE(store.openFile(path.string()));
+    REQUIRE(store.metrics().writtenBytes == 0);
+    REQUIRE(store.appendFrame(frame));
+    REQUIRE(store.appendFrame(frame));
+    REQUIRE(store.metrics().writtenBytes == 2 * kFrameSize);
+    REQUIRE(store.metrics().syncedBytes == 0);
+    REQUIRE(store.metrics().successfulSyncs == 0);
+
+    REQUIRE(store.appendFrame(frame)); // Rotates and syncs the previous segment.
+    REQUIRE(store.metrics().writtenBytes == 3 * kFrameSize);
+    REQUIRE(store.metrics().syncedBytes == 2 * kFrameSize);
+    REQUIRE(store.metrics().successfulSyncs == 1);
+
+    REQUIRE(store.sync());
+    REQUIRE(store.metrics().syncedBytes == 3 * kFrameSize);
+    REQUIRE(store.metrics().successfulSyncs == 2);
+}
+
 TEST_CASE("FileStore removes partial frame tail on open")
 {
     using namespace telemetry::protocol;
@@ -268,8 +294,7 @@ TEST_CASE("FileStore splits a batch across segment rotations without losing fram
 
     TemporaryDirectory directory;
     const auto activePath = directory.file("telemetry.bin");
-    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize,
-                                 .syncEveryBytes = kFrameSize};
+    const FileStoreConfig config{.maxSegmentBytes = 2 * kFrameSize, .syncEveryBytes = kFrameSize};
 
     std::vector<std::byte> batch;
     for (std::uint64_t timestamp = 1; timestamp <= 5; ++timestamp) {

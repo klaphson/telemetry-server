@@ -79,8 +79,7 @@ bool FileStore::appendFrames(std::span<const std::byte> frames)
         }
 
         const std::size_t remainingSegmentBytes = m_config.maxSegmentBytes - m_currentSize;
-        std::size_t chunkBytes =
-            std::min(frames.size() - offset, remainingSegmentBytes);
+        std::size_t chunkBytes = std::min(frames.size() - offset, remainingSegmentBytes);
 
         // Preserve the original frame-level fdatasync cadence. The threshold
         // may be unaligned, so round up to the next complete frame.
@@ -104,6 +103,7 @@ bool FileStore::appendFrames(std::span<const std::byte> frames)
 
             if (written > 0) {
                 writtenBytes += static_cast<std::size_t>(written);
+                m_metrics.writtenBytes += static_cast<std::uint64_t>(written);
                 continue;
             }
             if (written == -1 && errno == EINTR) {
@@ -118,8 +118,7 @@ bool FileStore::appendFrames(std::span<const std::byte> frames)
         m_currentSize += chunkBytes;
         m_unsyncedBytes += chunkBytes;
 
-        if (m_config.syncEveryBytes != 0 &&
-            m_unsyncedBytes >= m_config.syncEveryBytes) {
+        if (m_config.syncEveryBytes != 0 && m_unsyncedBytes >= m_config.syncEveryBytes) {
             if (!sync()) {
                 return false;
             }
@@ -138,6 +137,9 @@ bool FileStore::sync()
     while (true) {
         if (fdatasync(m_fd) == 0) {
             m_unsyncedBytes = 0;
+            // Rotation syncs the old segment before opening the next one.
+            m_metrics.syncedBytes = m_metrics.writtenBytes;
+            ++m_metrics.successfulSyncs;
             return true;
         }
 

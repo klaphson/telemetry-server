@@ -225,7 +225,8 @@ int main(int argc, char* argv[])
 
                                     .syncEveryBytes = config.syncEveryBytes,
 
-                                    .quiet = config.quiet};
+                                    .quiet = config.quiet,
+                                    .statsIntervalMs = config.statsIntervalMs};
 
     const ServerConfig serverConfig{
         .port = config.port, .quiet = config.quiet, .statsIntervalMs = config.statsIntervalMs};

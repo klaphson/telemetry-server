@@ -18,6 +18,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
@@ -200,6 +201,31 @@ void sendFrames(std::uint16_t port)
     }
 }
 
+bool hasMetricsLine(std::string_view logs, std::string_view prefix,
+                    std::initializer_list<std::string_view> fields)
+{
+    while (!logs.empty()) {
+        const auto end = logs.find('\n');
+        if (end == std::string_view::npos) {
+            return false; // Ignore a line that is still being written.
+        }
+        const auto line = logs.substr(0, end);
+        const auto start = line.find(prefix);
+        if (start != std::string_view::npos) {
+            const auto metrics = line.substr(start);
+            bool matches = true;
+            for (const auto field : fields) {
+                matches = matches && metrics.find(field) != std::string_view::npos;
+            }
+            if (matches) {
+                return true;
+            }
+        }
+        logs.remove_prefix(end + 1);
+    }
+    return false;
+}
+
 void run(const fs::path &binary, std::string_view mode)
 {
     TempDir temp;
@@ -227,10 +253,14 @@ void run(const fs::path &binary, std::string_view mode)
         while (Clock::now() < deadline) {
             require(server.running(), "Server exited before metrics observation");
             const std::string logs = readText(log);
-            if (logs.find("[metrics] accepted_total=64 ") != std::string::npos &&
-                logs.find("accepted_per_sec=") != std::string::npos &&
-                logs.find("backpressure_pauses=0") != std::string::npos &&
-                logs.find("protocol_errors=0") != std::string::npos) {
+            if (hasMetricsLine(logs, "[metrics] ",
+                               {"accepted_total=64 ", "accepted_per_sec=", "backpressure_pauses=0 ",
+                                "protocol_errors=0"}) &&
+                hasMetricsLine(logs, "[reader-metrics] ",
+                               {"consumed_total=64 ", "written_bytes_total=2048 ",
+                                "synced_bytes_total=0 ", "unsynced_bytes=2048 ",
+                                "written_bytes_per_sec=", "sync_successes=0 ", "storage_errors=0 ",
+                                "status=running"})) {
                 observed = true;
                 break;
             }
@@ -238,6 +268,11 @@ void run(const fs::path &binary, std::string_view mode)
         }
         require(observed, "expected opt-in metrics line was not emitted");
         server.stop();
+        require(hasMetricsLine(readText(log), "[reader-metrics] ",
+                               {"consumed_total=64 ", "written_bytes_total=2048 ",
+                                "synced_bytes_total=2048 ", "unsynced_bytes=0 ",
+                                "sync_successes=1 ", "storage_errors=0 ", "status=success"}),
+                "final Reader metrics did not confirm successful sync");
         require(fs::file_size(data) == 64 * telemetry::protocol::kFrameSize,
                 "incorrect persisted frame count");
         const auto bytes = readText(data);

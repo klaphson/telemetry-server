@@ -2,6 +2,7 @@
 #define READER_HPP
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 class SharedRingBuffer;
@@ -11,6 +12,7 @@ struct ReaderConfig {
     std::size_t maxSegmentBytes;
     std::size_t syncEveryBytes;
     bool quiet = false;
+    std::uint32_t statsIntervalMs = 0;
 };
 
 class Reader

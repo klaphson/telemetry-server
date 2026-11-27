@@ -17,6 +17,13 @@ struct FileStoreConfig {
     std::size_t syncEveryBytes = defaultSyncEveryBytes;
 };
 
+// Lifetime counters for new data written by this FileStore instance.
+struct FileStoreMetrics {
+    std::uint64_t writtenBytes = 0;
+    std::uint64_t syncedBytes = 0;
+    std::uint64_t successfulSyncs = 0;
+};
+
 class FileStore
 {
   public:
@@ -42,6 +49,11 @@ class FileStore
 
     [[nodiscard]]
     bool sync();
+
+    [[nodiscard]] FileStoreMetrics metrics() const
+    {
+        return m_metrics;
+    }
 
   private:
     [[nodiscard]]
@@ -69,6 +81,7 @@ class FileStore
     bool closeActiveFile();
 
     FileStoreConfig m_config;
+    FileStoreMetrics m_metrics;
 
     int m_fd = -1;
     int m_directoryFd = -1;
