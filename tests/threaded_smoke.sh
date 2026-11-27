@@ -66,8 +66,9 @@ fi
 
 exec 3<>/dev/tcp/127.0.0.1/9000
 printf '%b' "$frame" >&3
-exec 3>&-
+# Keep the disconnect log from interleaving with the reader's telemetry log.
 wait_for_log '[reader] telemetry: sensor=1 metric=2 timestamp_ns=3 value=1'
+exec 3>&-
 
 kill -TERM "$server_pid"
 wait_for_exit 0
