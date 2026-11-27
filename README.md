@@ -403,10 +403,28 @@ time between observations, not a fixed assumed interval. The final line is
 emitted on shutdown, including runs shorter than the configured interval.
 
 **Important:** `accepted_total` counts frames successfully published to shared
-memory; it is **not a durable-storage acknowledgment**. Reader write throughput,
-write-latency distribution, storage failures, and explicit writer health remain
-separate work in Stage 28. A busy server may delay a diagnostic line, and
-periodic stdout logging can add overhead when explicitly enabled.
+memory; it is **not a durable-storage acknowledgment**.
+
+The same interval enables independent `[reader-metrics]` lines:
+`consumed_total` counts frames popped from IPC; `written_bytes_total` counts
+bytes accepted by successful write calls (including partial writes);
+`synced_bytes_total` counts new bytes covered by successful file fdatasync
+calls, including before rotation. Existing file contents are excluded.
+`unsynced_bytes` is the difference of those counters; it is not the number
+of dirty pages in the kernel. `written_bytes_per_sec` uses monotonic elapsed
+time. `sync_successes` counts successful file fdatasync calls, not directory
+fsync calls. `storage_errors` counts failed Reader storage operations (open,
+append or final sync), not individual failed syscalls. `status` is running,
+success or failure; a final line is emitted on normal Reader return.
+A successful sync is not an independent hardware durability proof.
+
+The Reader uses poll on its data-ready eventfd to report even when idle.
+A blocked storage call, busy event loop, or blocked stdout can delay reports.
+No report is guaranteed after SIGKILL or an uncaught exception. The two
+streams are independently sampled; do not subtract unrelated samples as
+an exact queue-depth measurement. Counters are maintained even when reporting
+is disabled. Write-latency distribution and fault-injection coverage for
+these metrics remain separate work in Stage 28.
 
 ```bash
 ./build/telemetry-server --reader-mode process --stats-interval-ms 1000 --quiet
