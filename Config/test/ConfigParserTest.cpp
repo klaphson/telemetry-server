@@ -51,6 +51,7 @@ TEST_CASE("configuration uses defaults without arguments")
     REQUIRE(config.maxSegmentBytes == 64 * 1024 * 1024);
 
     REQUIRE(config.syncEveryBytes == 1 * 1024 * 1024);
+    REQUIRE(config.statsIntervalMs == 0);
 
     REQUIRE_FALSE(config.quiet);
 
@@ -269,6 +270,27 @@ TEST_CASE("configuration accepts port and storage boundaries")
             }
         }
     }
+}
+
+TEST_CASE("configuration accepts opt-in periodic monitoring and checks its limits")
+{
+    for (const auto* value : {"0", "100", "1000", "60000"}) {
+        AppConfig config;
+        std::ostringstream errors;
+        REQUIRE(parseOptions({"--stats-interval-ms", value}, config, errors) ==
+                ParseStatus::Success);
+        REQUIRE(config.statsIntervalMs == std::stoul(value));
+        REQUIRE(errors.str().empty());
+    }
+    for (const auto* value : {"1", "99", "60001", "-1", "invalid"}) {
+        AppConfig config;
+        std::ostringstream errors;
+        REQUIRE(parseOptions({"--stats-interval-ms", value}, config, errors) == ParseStatus::Error);
+        REQUIRE(errors.str().find("invalid stats interval") != std::string::npos);
+    }
+    AppConfig config;
+    std::ostringstream errors;
+    REQUIRE(parseOptions({"--stats-interval-ms"}, config, errors) == ParseStatus::Error);
 }
 
 TEST_CASE("configuration recognizes both help options")

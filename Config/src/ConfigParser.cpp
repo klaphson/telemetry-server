@@ -182,6 +182,17 @@ ParseStatus parseArguments(int argc, char* const argv[], AppConfig &config,
             continue;
         }
 
+        if (argument == "--stats-interval-ms") {
+            const auto value = nextValue();
+            if (!value || !parseUnsigned(*value, config.statsIntervalMs) ||
+                (config.statsIntervalMs != 0 &&
+                 (config.statsIntervalMs < 100 || config.statsIntervalMs > 60000))) {
+                errorOutput << "invalid stats interval (expected 0 or 100..60000 ms)\n";
+                return ParseStatus::Error;
+            }
+            continue;
+        }
+
         errorOutput << "unknown argument: " << argument << '\n';
 
         return ParseStatus::Error;
@@ -203,6 +214,7 @@ void printUsage(std::ostream &output, std::string_view programName)
            << "  --data-file PATH\n"
            << "  --segment-bytes BYTES\n"
            << "  --sync-bytes BYTES\n"
+           << "  --stats-interval-ms N (0=off, otherwise 100..60000)\n"
            << "  --quiet (suppress per-record logs)\n"
            << "  -h, --help\n";
 }

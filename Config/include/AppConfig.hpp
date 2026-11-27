@@ -21,6 +21,9 @@ struct AppConfig {
 
     std::size_t syncEveryBytes = 1 * 1024 * 1024;
 
+    // Zero disables periodic metrics; nonzero value is 100..60000 ms.
+    std::uint32_t statsIntervalMs = 0;
+
     bool quiet = false;
 };
 

@@ -15,6 +15,7 @@ struct epoll_event;
 struct ServerConfig {
     std::uint16_t port = 9000;
     bool quiet = false;
+    std::uint32_t statsIntervalMs = 0;
 };
 
 class SharedRingBuffer;
@@ -56,6 +57,10 @@ class Server
 
     ServerConfig m_config;
     std::unordered_map<int, ClientState> m_clients;
+    std::uint64_t m_acceptedFrames = 0;
+    std::uint64_t m_protocolErrors = 0;
+    std::uint64_t m_backpressurePauses = 0;
+    std::uint64_t m_backpressureResumes = 0;
 
     // Socket setup
     int createSocket() const;
