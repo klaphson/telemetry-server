@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstddef>
@@ -21,6 +22,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -201,8 +203,46 @@ void sendFrames(std::uint16_t port)
     }
 }
 
+std::optional<std::uint64_t> metricNumber(std::string_view line, std::string_view name)
+{
+    const std::string key = " " + std::string(name) + "=";
+    const auto start = line.find(key);
+    if (start == std::string_view::npos) {
+        return std::nullopt;
+    }
+    line.remove_prefix(start + key.size());
+    const auto value = line.substr(0, line.find(' '));
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    std::uint64_t result = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), result);
+    if (error != std::errc{} || end != value.data() + value.size()) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+bool validFinalLatency(std::string_view line)
+{
+    const auto writes = metricNumber(line, "write_latency_samples");
+    const auto syncs = metricNumber(line, "sync_latency_samples");
+    if (!writes || *writes == 0 || !syncs || *syncs != 1) {
+        return false;
+    }
+    for (const std::string_view prefix : {"write", "sync"}) {
+        const auto p50 = metricNumber(line, std::string(prefix) + "_p50_us");
+        const auto p95 = metricNumber(line, std::string(prefix) + "_p95_us");
+        const auto p99 = metricNumber(line, std::string(prefix) + "_p99_us");
+        if (!p50 || !p95 || !p99 || *p50 == 0 || *p50 > *p95 || *p95 > *p99) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool hasMetricsLine(std::string_view logs, std::string_view prefix,
-                    std::initializer_list<std::string_view> fields)
+                    std::initializer_list<std::string_view> fields, bool checkLatency = false)
 {
     while (!logs.empty()) {
         const auto end = logs.find('\n');
@@ -217,7 +257,7 @@ bool hasMetricsLine(std::string_view logs, std::string_view prefix,
             for (const auto field : fields) {
                 matches = matches && metrics.find(field) != std::string_view::npos;
             }
-            if (matches) {
+            if (matches && (!checkLatency || validFinalLatency(metrics))) {
                 return true;
             }
         }
@@ -256,11 +296,12 @@ void run(const fs::path &binary, std::string_view mode)
             if (hasMetricsLine(logs, "[metrics] ",
                                {"accepted_total=64 ", "accepted_per_sec=", "backpressure_pauses=0 ",
                                 "protocol_errors=0"}) &&
-                hasMetricsLine(logs, "[reader-metrics] ",
-                               {"consumed_total=64 ", "written_bytes_total=2048 ",
-                                "synced_bytes_total=0 ", "unsynced_bytes=2048 ",
-                                "written_bytes_per_sec=", "sync_successes=0 ", "storage_errors=0 ",
-                                "status=running"})) {
+                hasMetricsLine(
+                    logs, "[reader-metrics] ",
+                    {"consumed_total=64 ", "written_bytes_total=2048 ", "synced_bytes_total=0 ",
+                     "unsynced_bytes=2048 ", "written_bytes_per_sec=", "sync_successes=0 ",
+                     "storage_errors=0 ", "write_latency_samples=", "sync_latency_samples=0 ",
+                     "sync_p50_us=0 ", "sync_p95_us=0 ", "sync_p99_us=0 ", "status=running"})) {
                 observed = true;
                 break;
             }
@@ -271,8 +312,9 @@ void run(const fs::path &binary, std::string_view mode)
         require(hasMetricsLine(readText(log), "[reader-metrics] ",
                                {"consumed_total=64 ", "written_bytes_total=2048 ",
                                 "synced_bytes_total=2048 ", "unsynced_bytes=0 ",
-                                "sync_successes=1 ", "storage_errors=0 ", "status=success"}),
-                "final Reader metrics did not confirm successful sync");
+                                "sync_successes=1 ", "storage_errors=0 ", "status=success"},
+                               true),
+                "final Reader metrics did not confirm successful sync and valid latency");
         require(fs::file_size(data) == 64 * telemetry::protocol::kFrameSize,
                 "incorrect persisted frame count");
         const auto bytes = readText(data);

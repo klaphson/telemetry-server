@@ -7,10 +7,22 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <iostream>
 #include <string>
+
+namespace
+{
+using Clock = std::chrono::steady_clock;
+
+std::uint64_t elapsedMicroseconds(Clock::time_point start)
+{
+    return static_cast<std::uint64_t>(
+        std::chrono::ceil<std::chrono::microseconds>(Clock::now() - start).count());
+}
+} // namespace
 
 FileStore::FileStore(FileStoreConfig config) : m_config(config) {}
 
@@ -98,10 +110,14 @@ bool FileStore::appendFrames(std::span<const std::byte> frames)
 
         std::size_t writtenBytes = 0;
         while (writtenBytes < chunkBytes) {
+            const auto start = m_config.measureLatency ? Clock::now() : Clock::time_point{};
             const ssize_t written =
                 write(m_fd, frames.data() + offset + writtenBytes, chunkBytes - writtenBytes);
 
             if (written > 0) {
+                if (m_config.measureLatency) {
+                    m_writeLatency.record(elapsedMicroseconds(start));
+                }
                 writtenBytes += static_cast<std::size_t>(written);
                 m_metrics.writtenBytes += static_cast<std::uint64_t>(written);
                 continue;
@@ -135,7 +151,11 @@ bool FileStore::sync()
     }
 
     while (true) {
+        const auto start = m_config.measureLatency ? Clock::now() : Clock::time_point{};
         if (fdatasync(m_fd) == 0) {
+            if (m_config.measureLatency) {
+                m_syncLatency.record(elapsedMicroseconds(start));
+            }
             m_unsyncedBytes = 0;
             // Rotation syncs the old segment before opening the next one.
             m_metrics.syncedBytes = m_metrics.writtenBytes;
