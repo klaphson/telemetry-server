@@ -1,4 +1,5 @@
 #include "FileStore.hpp"
+#include "LatencyHistogram.hpp"
 #include "TelemetryCodec.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -89,6 +91,78 @@ class TemporaryDirectory
   private:
     std::string m_path;
 };
+
+TEST_CASE("LatencyHistogram estimates nearest-rank percentiles from bounded buckets")
+{
+    LatencyHistogram histogram;
+    REQUIRE(histogram.count() == 0);
+    REQUIRE(histogram.percentile(99) == 0);
+
+    for (int i = 0; i < 95; ++i) {
+        histogram.record(3);
+    }
+    for (int i = 0; i < 4; ++i) {
+        histogram.record(9);
+    }
+    histogram.record(1000);
+
+    REQUIRE(histogram.count() == 100);
+    REQUIRE(histogram.percentile(50) == 4);
+    REQUIRE(histogram.percentile(95) == 4);
+    REQUIRE(histogram.percentile(99) == 16);
+    REQUIRE(histogram.percentile(100) == 1024);
+    REQUIRE(histogram.percentile(0) == 0);
+    REQUIRE(histogram.percentile(101) == 0);
+}
+
+TEST_CASE("LatencyHistogram handles zero, exact boundaries and the largest sample")
+{
+    LatencyHistogram histogram;
+    histogram.record(0);
+    histogram.record(1);
+    histogram.record(2);
+    histogram.record(3);
+    histogram.record(std::numeric_limits<std::uint64_t>::max());
+
+    REQUIRE(histogram.percentile(20) == 1);
+    REQUIRE(histogram.percentile(40) == 1);
+    REQUIRE(histogram.percentile(60) == 2);
+    REQUIRE(histogram.percentile(80) == 4);
+    REQUIRE(histogram.percentile(100) == std::numeric_limits<std::uint64_t>::max());
+}
+
+TEST_CASE("FileStore latency collection is opt-in and spans rotation")
+{
+    using namespace telemetry::protocol;
+    TemporaryDirectory directory;
+    const auto frame = encode(TelemetryRecord{1, 2, 3, 4.0});
+
+    FileStore disabled;
+    REQUIRE(disabled.openFile(directory.file("disabled.bin").string()));
+    REQUIRE(disabled.appendFrame(frame));
+    REQUIRE(disabled.sync());
+    REQUIRE(disabled.writeLatency().count() == 0);
+    REQUIRE(disabled.syncLatency().count() == 0);
+
+    FileStore enabled{FileStoreConfig{
+        .maxSegmentBytes = 2 * kFrameSize, .syncEveryBytes = 0, .measureLatency = true}};
+    REQUIRE(enabled.openFile(directory.file("enabled.bin").string()));
+    REQUIRE(enabled.writeLatency().count() == 0);
+    REQUIRE(enabled.syncLatency().count() == 0);
+    REQUIRE(enabled.appendFrame(frame));
+    REQUIRE(enabled.appendFrame(frame));
+    REQUIRE(enabled.appendFrame(frame)); // Sync during rotation.
+    REQUIRE(enabled.writeLatency().count() >= 3);
+    REQUIRE(enabled.syncLatency().count() == 1);
+    REQUIRE(enabled.sync());
+    REQUIRE(enabled.syncLatency().count() == 2);
+    REQUIRE(enabled.syncLatency().count() == enabled.metrics().successfulSyncs);
+    for (const auto* histogram : {&enabled.writeLatency(), &enabled.syncLatency()}) {
+        REQUIRE(histogram->percentile(50) >= 1);
+        REQUIRE(histogram->percentile(50) <= histogram->percentile(95));
+        REQUIRE(histogram->percentile(95) <= histogram->percentile(99));
+    }
+}
 
 TEST_CASE("FileStore appends binary telemetry frames")
 {

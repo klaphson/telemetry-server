@@ -1,6 +1,8 @@
 #ifndef FILE_STORE_HPP
 #define FILE_STORE_HPP
 
+#include "LatencyHistogram.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -15,6 +17,7 @@ struct FileStoreConfig {
     std::size_t maxSegmentBytes = defaultMaxSegmentBytes;
 
     std::size_t syncEveryBytes = defaultSyncEveryBytes;
+    bool measureLatency = false;
 };
 
 // Lifetime counters for new data written by this FileStore instance.
@@ -55,6 +58,15 @@ class FileStore
         return m_metrics;
     }
 
+    [[nodiscard]] const LatencyHistogram &writeLatency() const noexcept
+    {
+        return m_writeLatency;
+    }
+    [[nodiscard]] const LatencyHistogram &syncLatency() const noexcept
+    {
+        return m_syncLatency;
+    }
+
   private:
     [[nodiscard]]
     bool validateConfig() const;
@@ -82,6 +94,8 @@ class FileStore
 
     FileStoreConfig m_config;
     FileStoreMetrics m_metrics;
+    LatencyHistogram m_writeLatency;
+    LatencyHistogram m_syncLatency;
 
     int m_fd = -1;
     int m_directoryFd = -1;

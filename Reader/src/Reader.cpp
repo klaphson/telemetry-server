@@ -28,7 +28,8 @@ int Reader::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
     std::cout << "[reader] pid=" << getpid() << '\n';
 
     FileStore store{FileStoreConfig{.maxSegmentBytes = config.maxSegmentBytes,
-                                    .syncEveryBytes = config.syncEveryBytes}};
+                                    .syncEveryBytes = config.syncEveryBytes,
+                                    .measureLatency = config.statsIntervalMs != 0}};
 
     using Clock = std::chrono::steady_clock;
     const bool monitoring = config.statsIntervalMs != 0;
@@ -52,6 +53,8 @@ int Reader::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
             std::max(0.001, std::chrono::duration<double>(now - previousSample).count());
         const double rate = static_cast<double>(storage.writtenBytes - previousWritten) / seconds;
 
+        const auto &writeLatency = store.writeLatency();
+        const auto &syncLatency = store.syncLatency();
         std::ostringstream report;
         report << "[reader-metrics] consumed_total=" << consumedFrames
                << " written_bytes_total=" << storage.writtenBytes
@@ -59,7 +62,15 @@ int Reader::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
                << " unsynced_bytes=" << storage.writtenBytes - storage.syncedBytes
                << " written_bytes_per_sec=" << std::fixed << std::setprecision(1) << rate
                << " sync_successes=" << storage.successfulSyncs
-               << " storage_errors=" << storageErrors << " status=" << status << '\n';
+               << " storage_errors=" << storageErrors
+               << " write_latency_samples=" << writeLatency.count()
+               << " write_p50_us=" << writeLatency.percentile(50)
+               << " write_p95_us=" << writeLatency.percentile(95)
+               << " write_p99_us=" << writeLatency.percentile(99)
+               << " sync_latency_samples=" << syncLatency.count()
+               << " sync_p50_us=" << syncLatency.percentile(50)
+               << " sync_p95_us=" << syncLatency.percentile(95)
+               << " sync_p99_us=" << syncLatency.percentile(99) << " status=" << status << '\n';
         std::cout << report.str();
         previousSample = now;
         previousWritten = storage.writtenBytes;

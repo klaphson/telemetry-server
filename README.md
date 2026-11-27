@@ -423,8 +423,26 @@ A blocked storage call, busy event loop, or blocked stdout can delay reports.
 No report is guaranteed after SIGKILL or an uncaught exception. The two
 streams are independently sampled; do not subtract unrelated samples as
 an exact queue-depth measurement. Counters are maintained even when reporting
-is disabled. Write-latency distribution and fault-injection coverage for
-these metrics remain separate work in Stage 28.
+is disabled. Latency collection, unlike the byte counters, is opt-in:
+no per-operation clock reads are added when reporting is disabled.
+
+Reader metrics include `write_latency_samples`, `write_p50_us`,
+`write_p95_us`, `write_p99_us` and the corresponding `sync_*` fields.
+Each sample is the elapsed monotonic time of one successful positive
+`write()` or successful `fdatasync()` syscall, rounded up to microseconds.
+Partial successful writes are separate samples. Failed calls and EINTR
+attempts are excluded, as are directory fsync, rotation as a whole,
+IPC waiting, and end-to-end frame latency.
+
+The histograms are cumulative for the FileStore lifetime, including rotation
+and the final sync. They use 65 power-of-two buckets and nearest-rank
+percentiles reported as bucket upper bounds (e.g. 3 us is reported as 4 us).
+A zero sample count means no measurements; its percentiles are all zero.
+Small sample counts, bucket rounding and changing write sizes limit the
+interpretation of percentiles; do not treat them as exact tail timings.
+A blocked syscall is not sampled until it returns successfully.
+Fault-injection metrics checks and explicit writer-stall detection remain
+separate work in Stage 28.
 
 ```bash
 ./build/telemetry-server --reader-mode process --stats-interval-ms 1000 --quiet
