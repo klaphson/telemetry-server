@@ -14,13 +14,16 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -118,8 +121,41 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
     bool running = true;
     bool ingressPaused = false;
 
-    // Periodically check the result in case the completion notification fails.
-    const int timeoutMs = readerCompletion != nullptr ? 250 : -1;
+    // Opt-in periodic reporting. Counters describe accepted ingress into IPC,
+    // NOT records durably stored by the Reader.
+    using Clock = std::chrono::steady_clock;
+    const auto interval = std::chrono::milliseconds(m_config.statsIntervalMs);
+    auto previousSample = Clock::now();
+    auto nextSample = previousSample + interval;
+    std::uint64_t previousAccepted = 0;
+    const auto reportMetrics = [&](Clock::time_point now, bool force) {
+        if (m_config.statsIntervalMs == 0 || (!force && now < nextSample)) {
+            return;
+        }
+        const auto elapsedMs = std::max<std::int64_t>(
+            1, std::chrono::duration_cast<std::chrono::milliseconds>(now - previousSample).count());
+        const double rate = static_cast<double>(m_acceptedFrames - previousAccepted) * 1000.0 /
+                            static_cast<double>(elapsedMs);
+        const std::size_t pending = ring.pendingBytes();
+        std::ostringstream report;
+        report << "[metrics] accepted_total=" << m_acceptedFrames
+               << " accepted_per_sec=" << std::fixed << std::setprecision(1) << rate
+               << " clients_active=" << m_clients.size() << " ring_pending_bytes=" << pending
+               << " ring_fill_percent="
+               << (100.0 * static_cast<double>(pending) /
+                   static_cast<double>(SharedRingBuffer::capacityBytes))
+               << " backpressure_pauses=" << m_backpressurePauses
+               << " backpressure_resumes=" << m_backpressureResumes
+               << " protocol_errors=" << m_protocolErrors;
+        std::cout << report.str() << '\n';
+        previousSample = now;
+        previousAccepted = m_acceptedFrames;
+        nextSample = now + interval;
+    };
+
+    // Preserve completion polling for the threaded Reader. Otherwise epoll
+    // sleeps until the next metrics deadline or an actual event arrives.
+    const int readerPollTimeoutMs = readerCompletion != nullptr ? 250 : -1;
 
     while (running) {
         if (readerCompletion != nullptr) {
@@ -136,7 +172,19 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
             break;
         }
 
-        const int ready = epoll_wait(epoll_fd, events.data(), static_cast<int>(events.size()), timeoutMs);
+        int waitTimeoutMs = readerPollTimeoutMs;
+        if (m_config.statsIntervalMs != 0) {
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(nextSample - Clock::now())
+                    .count();
+            const int metricsTimeoutMs = static_cast<int>(std::clamp<std::int64_t>(
+                remaining, 0, static_cast<std::int64_t>(m_config.statsIntervalMs)));
+            if (waitTimeoutMs < 0 || metricsTimeoutMs < waitTimeoutMs) {
+                waitTimeoutMs = metricsTimeoutMs;
+            }
+        }
+        const int ready =
+            epoll_wait(epoll_fd, events.data(), static_cast<int>(events.size()), waitTimeoutMs);
 
         if (ready == -1) {
             if (errno == EINTR) {
@@ -155,8 +203,7 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
                     (event.events & (EPOLLERR | EPOLLHUP)) == 0U &&
                     telemetry::ipc::consumeEvent(readerCompletion->fd)) {
                     std::cerr << "[server] reader thread stopped code="
-                              << readerCompletion->result.load(std::memory_order_acquire)
-                              << '\n';
+                              << readerCompletion->result.load(std::memory_order_acquire) << '\n';
                 } else {
                     std::cerr << "[server] reader completion eventfd error\n";
                 }
@@ -182,8 +229,10 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
                 break;
             }
         }
+        reportMetrics(Clock::now(), false);
     }
 
+    reportMetrics(Clock::now(), true);
     removeAllClients(epoll_fd);
 
     if (listen_fd != -1) {
@@ -275,6 +324,7 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd,
                 }
 
                 ingressPaused = false;
+                ++m_backpressureResumes;
 
                 std::cout << "[server] ingress resumed, IPC pending=" << ring.pendingBytes()
                           << '\n';
@@ -304,6 +354,7 @@ bool Server::handleEvent(const epoll_event &event, int epollFd, int listenFd,
             }
 
             ingressPaused = true;
+            ++m_backpressurePauses;
 
             std::cout << "[server] ingress paused, ring buffer pending=" << ring.pendingBytes()
                       << '\n';
@@ -420,8 +471,7 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
 
             for (std::size_t index = 0; index < availableFrames; ++index) {
                 const std::span<const std::byte> frame{
-                    client.inputBuffer.data.data() + client.inputBuffer.offset +
-                        index * kFrameSize,
+                    client.inputBuffer.data.data() + client.inputBuffer.offset + index * kFrameSize,
                     kFrameSize};
                 const DecodeResult decoded = decode(frame);
 
@@ -441,11 +491,12 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
             }
 
             if (validFrames != 0) {
-                const std::span<const std::byte> validBytes{
-                    client.inputBuffer.data.data() + client.inputBuffer.offset,
-                    validFrames * kFrameSize};
+                const std::span<const std::byte> validBytes{client.inputBuffer.data.data() +
+                                                                client.inputBuffer.offset,
+                                                            validFrames * kFrameSize};
                 const std::size_t pushed = ring.tryPushBatch(validBytes);
                 client.inputBuffer.offset += pushed * kFrameSize;
+                m_acceptedFrames += static_cast<std::uint64_t>(pushed);
                 publishedAny = pushed != 0;
 
                 if (pushed != validFrames) {
@@ -465,6 +516,7 @@ bool Server::readClient(int epollFd, int clientFd, SharedRingBuffer &ring, int d
             }
 
             if (invalidError != DecodeError::None) {
+                ++m_protocolErrors;
                 // Publish the preceding valid frames before rejecting this
                 // client, preserving already accepted frames.
                 if (!notifyPublished()) {

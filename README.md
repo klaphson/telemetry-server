@@ -389,6 +389,30 @@ void codecExample()
 
 Link the `Protocol` CMake target to use the codec and its public include directory.
 
+## Monitoring (Stage 28 — initial diagnostics)
+
+Use `--stats-interval-ms 1000` to emit a structured `[metrics]` line approximately
+once per second, in either `--reader-mode process` or `thread`. Periodic reporting
+is **disabled by default** (`0`) to avoid changing benchmark throughput. The
+valid nonzero interval is 100..60000 ms.
+
+Each line contains `accepted_total`, `accepted_per_sec`, `clients_active`,
+`ring_pending_bytes`, `ring_fill_percent`, `backpressure_pauses`,
+`backpressure_resumes`, and `protocol_errors`. The rate uses monotonic elapsed
+time between observations, not a fixed assumed interval. The final line is
+emitted on shutdown, including runs shorter than the configured interval.
+
+**Important:** `accepted_total` counts frames successfully published to shared
+memory; it is **not a durable-storage acknowledgment**. Reader write throughput,
+write-latency distribution, storage failures, and explicit writer health remain
+separate work in Stage 28. A busy server may delay a diagnostic line, and
+periodic stdout logging can add overhead when explicitly enabled.
+
+```bash
+./build/telemetry-server --reader-mode process --stats-interval-ms 1000 --quiet
+make monitoring-test
+```
+
 ## File storage
 
 The active file and archived segments contain consecutive 32-byte wire frames,
@@ -509,7 +533,13 @@ can mount `tmpfs` at `/tmp/telemetry-enospc` with `size=524288`, for example.
 make storage-recovery-test
 # Optional: test with a dedicated mount when namespaces are unavailable:
 TELEMETRY_ENOSPC_DIR=/tmp/telemetry-enospc ctest --test-dir build \
-  -R '^telemetry_storage_recovery_enospc
+  -R '^telemetry_storage_recovery_enospc$' --output-on-failure -V
+```
+
+`ENOSPC` verifies a full filesystem, not the effect of a sudden power loss.
+A successful `fdatasync()` and directory `fsync()` rely on the OS and storage
+stack honoring their durability contracts; these tests cannot prove hardware
+or controller behavior during a power failure.
 
 ## Tests
 

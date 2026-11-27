@@ -95,6 +95,18 @@ if(BUILD_TESTING)
             TIMEOUT 25 RESOURCE_LOCK telemetry_tcp_port)
     endforeach()
 
+    # C++20 integration coverage for opt-in metrics, process and thread Reader.
+    add_executable(telemetry-monitoring-test tests/monitoring_metrics.cpp)
+    target_link_libraries(telemetry-monitoring-test PRIVATE
+        Protocol telemetry_build_options Threads::Threads)
+    foreach(mode IN ITEMS process thread)
+        add_test(NAME telemetry_monitoring_${mode}
+            COMMAND $<TARGET_FILE:telemetry-monitoring-test>
+                $<TARGET_FILE:telemetry-server> ${mode})
+        set_tests_properties(telemetry_monitoring_${mode} PROPERTIES
+            TIMEOUT 25 RESOURCE_LOCK telemetry_tcp_port)
+    endforeach()
+
     # C++20 integration harness: no Python or Catch2 required.
     add_executable(telemetry-multi-client-test tests/multi_client_tcp.cpp)
     target_link_libraries(telemetry-multi-client-test PRIVATE

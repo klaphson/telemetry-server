@@ -1,4 +1,4 @@
-.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc multi-client-test process-failure-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
+.PHONY: configure build run run-service test benchmark-build benchmark benchmark-matrix benchmark-test benchmark-ipc multi-client-test monitoring-test process-failure-test profile-syscalls profile-cpu-build profile-cpu profile-cpu-check profile-cpu-test format hooks clean docker-build docker-shell docker-run
 
 format:
 	pre-commit run --all-files
@@ -44,6 +44,9 @@ process-failure-test: build
 
 storage-recovery-test: build
 	ctest --test-dir build -R '^telemetry_storage_recovery_' --output-on-failure
+
+monitoring-test: build
+	ctest --test-dir build -R '^telemetry_monitoring_' --output-on-failure
 
 benchmark-ipc: benchmark-build
 	mkdir -p build-ipc-results
