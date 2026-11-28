@@ -107,6 +107,19 @@ if(BUILD_TESTING)
             TIMEOUT 25 RESOURCE_LOCK telemetry_tcp_port)
     endforeach()
 
+    add_test(NAME telemetry_monitoring_watchdog
+        COMMAND $<TARGET_FILE:telemetry-monitoring-test>
+            $<TARGET_FILE:telemetry-server> process watchdog)
+    set_tests_properties(telemetry_monitoring_watchdog PROPERTIES
+        TIMEOUT 30 RESOURCE_LOCK telemetry_tcp_port)
+    foreach(mode IN ITEMS process thread)
+        add_test(NAME telemetry_monitoring_write_failure_${mode}
+            COMMAND $<TARGET_FILE:telemetry-monitoring-test>
+                $<TARGET_FILE:telemetry-server> ${mode} write-failure)
+        set_tests_properties(telemetry_monitoring_write_failure_${mode} PROPERTIES
+            TIMEOUT 25 RESOURCE_LOCK telemetry_tcp_port)
+    endforeach()
+
     # C++20 integration harness: no Python or Catch2 required.
     add_executable(telemetry-multi-client-test tests/multi_client_tcp.cpp)
     target_link_libraries(telemetry-multi-client-test PRIVATE

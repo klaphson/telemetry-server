@@ -4,6 +4,7 @@
 #include "TelemetryCodec.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
 
 // Shared frame queue for exactly one producer and one consumer.
@@ -68,6 +69,11 @@ class SharedRingBuffer
 
     [[nodiscard]]
     bool producerClosed() const noexcept;
+
+    // Diagnostic heartbeat: only the Reader publishes, the Server observes.
+    void publishReaderHeartbeat() noexcept;
+
+    [[nodiscard]] std::uint64_t readerHeartbeat() const noexcept;
 
   private:
     struct Layout;

@@ -72,6 +72,11 @@ int Reader::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd,
                << " sync_p95_us=" << syncLatency.percentile(95)
                << " sync_p99_us=" << syncLatency.percentile(99) << " status=" << status << '\n';
         std::cout << report.str();
+        // Publish only after a normal running report. A final failure report
+        // must not make a failed Reader appear healthy.
+        if (status == "running") {
+            ring.publishReaderHeartbeat();
+        }
         previousSample = now;
         previousWritten = storage.writtenBytes;
         nextSample = now + interval;

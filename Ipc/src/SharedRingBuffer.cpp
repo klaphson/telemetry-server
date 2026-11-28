@@ -29,6 +29,8 @@ struct SharedRingBuffer::Layout {
 
     alignas(cacheLineSize) std::atomic<std::uint32_t> producerClosed{0};
 
+    alignas(cacheLineSize) std::atomic<std::uint64_t> readerHeartbeat{0};
+
     alignas(cacheLineSize) std::array<telemetry::protocol::Frame, capacityFrames> slots{};
 };
 
@@ -238,4 +240,16 @@ bool SharedRingBuffer::producerClosed() const noexcept
     }
 
     return m_layout->producerClosed.load(std::memory_order_acquire) != 0;
+}
+
+void SharedRingBuffer::publishReaderHeartbeat() noexcept
+{
+    if (m_layout != nullptr) {
+        m_layout->readerHeartbeat.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+std::uint64_t SharedRingBuffer::readerHeartbeat() const noexcept
+{
+    return m_layout != nullptr ? m_layout->readerHeartbeat.load(std::memory_order_relaxed) : 0;
 }

@@ -441,8 +441,31 @@ A zero sample count means no measurements; its percentiles are all zero.
 Small sample counts, bucket rounding and changing write sizes limit the
 interpretation of percentiles; do not treat them as exact tail timings.
 A blocked syscall is not sampled until it returns successfully.
-Fault-injection metrics checks and explicit writer-stall detection remain
-separate work in Stage 28.
+With monitoring enabled, the Reader publishes an atomic heartbeat sequence in
+the shared mapping after each running report, including while idle. The Server
+observes it independently in its own metrics reports:
+`reader_heartbeat_seq`, `reader_heartbeat_age_ms`,
+`reader_stall_threshold_ms` and `reader_health` (starting, responsive,
+suspected_stall). Age is time since the Server last observed a sequence
+change, not the exact time since publication. The suspicion threshold is
+max(3000 ms, 3 * stats interval); observation is limited by Server scheduling
+and report cadence. No heartbeat after the startup grace period also produces
+suspected_stall. A new heartbeat clears suspicion.
+
+This diagnostic watchdog does not terminate or restart either component.
+A stalled syscall, SIGSTOP, scheduler delay or blocked Reader logging may
+cause suspicion; it is not proof of disk failure. The heartbeat is not a
+durability acknowledgment or proof of per-frame progress. Actual exits use
+the existing process/thread completion paths; final Server reports show the
+last observed heartbeat, not exit status. Once the Server event loop exits,
+the watchdog stops; final Reader shutdown uses existing lifecycle handling
+(process timeout, thread join). A stalled Server cannot monitor itself.
+
+Native monitoring tests check idle heartbeat in both modes, process
+SIGSTOP/SIGCONT stall and recovery, and a partial write followed by EFBIG
+using a child-only RLIMIT_FSIZE. Failure-test diagnostics travel over a pipe
+so the file-size limit does not truncate logs. These are diagnostic tests,
+not a hardware power-loss or genuine ENOSPC experiment.
 
 ```bash
 ./build/telemetry-server --reader-mode process --stats-interval-ms 1000 --quiet

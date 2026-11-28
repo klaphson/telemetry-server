@@ -128,6 +128,9 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
     auto previousSample = Clock::now();
     auto nextSample = previousSample + interval;
     std::uint64_t previousAccepted = 0;
+    std::uint64_t lastHeartbeat = 0;
+    auto lastHeartbeatObservation = previousSample;
+    const auto stallThreshold = std::max(std::chrono::milliseconds{3000}, interval * 3);
     const auto reportMetrics = [&](Clock::time_point now, bool force) {
         if (m_config.statsIntervalMs == 0 || (!force && now < nextSample)) {
             return;
@@ -137,6 +140,17 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
         const double rate = static_cast<double>(m_acceptedFrames - previousAccepted) * 1000.0 /
                             static_cast<double>(elapsedMs);
         const std::size_t pending = ring.pendingBytes();
+        const auto heartbeat = ring.readerHeartbeat();
+        if (heartbeat != lastHeartbeat) {
+            lastHeartbeat = heartbeat;
+            lastHeartbeatObservation = now;
+        }
+        const auto heartbeatAge = now - lastHeartbeatObservation;
+        const char* readerHealth = heartbeatAge >= stallThreshold
+                                       ? "suspected_stall"
+                                       : (heartbeat == 0 ? "starting" : "responsive");
+        const auto heartbeatAgeMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(heartbeatAge).count();
         std::ostringstream report;
         report << "[metrics] accepted_total=" << m_acceptedFrames
                << " accepted_per_sec=" << std::fixed << std::setprecision(1) << rate
@@ -146,7 +160,11 @@ int Server::run(SharedRingBuffer &ring, int dataReadyFd, int spaceReadyFd, int s
                    static_cast<double>(SharedRingBuffer::capacityBytes))
                << " backpressure_pauses=" << m_backpressurePauses
                << " backpressure_resumes=" << m_backpressureResumes
-               << " protocol_errors=" << m_protocolErrors;
+               << " protocol_errors=" << m_protocolErrors
+               << " reader_heartbeat_seq=" << heartbeat
+               << " reader_heartbeat_age_ms=" << heartbeatAgeMs
+               << " reader_stall_threshold_ms=" << stallThreshold.count()
+               << " reader_health=" << readerHealth;
         std::cout << report.str() << '\n';
         previousSample = now;
         previousAccepted = m_acceptedFrames;
